@@ -816,6 +816,6 @@ def main():
 
 #Licensed under the Daniel Personal‑Use License (DPUL‑1.0)
 #See LICENSE file in the project root for full terms.
-#
+#https://github.com/DD-Dan11233456/LAN-Link
 if __name__ == "__main__":
     main()
