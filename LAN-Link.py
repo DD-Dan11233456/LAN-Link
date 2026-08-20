@@ -1,0 +1,1390 @@
+#!/usr/init/env python3
+"""
+LAN-Link V1.0.2 - All-in-One Edition with Direct Client-to-Client P2P File Sharing
+Host a room or join one from the same app. Host-only /kick and /ban, plus direct P2P files.
+
+Run with: python3 chat_app.py
+Requires tkinter (Linux: sudo apt install python3-tk)
+"""
+
+import sys
+import socket
+import threading
+import queue
+import json
+import time
+import smtplib
+import secrets
+import os
+from email.message import EmailMessage
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
+
+DISCOVERY_PORT = 54545
+PORT_POOL_START = 5000
+PORT_POOL_MAX_INITIAL = 5500
+_dynamic_port_ceiling = PORT_POOL_MAX_INITIAL
+
+
+def get_next_available_port():
+    """Dynamically yields ports, expanding the pool ceiling if all current ones are busy."""
+    global _dynamic_port_ceiling
+    while True:
+        for p in range(PORT_POOL_START, _dynamic_port_ceiling + 1):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", p))
+                return sock, p
+            except OSError:
+                sock.close()
+                continue
+        _dynamic_port_ceiling += 1
+        print(f"[Server] Pool exhausted! Dynamically expanding port ceiling to {_dynamic_port_ceiling}...")
+
+
+def discover_rooms(timeout=1.5):
+    """Broadcasts a discovery packet on the LAN and collects room replies."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(0.3)
+
+    try:
+        sock.sendto(b"CHATROOM_DISCOVER_V1", ("<broadcast>", DISCOVERY_PORT))
+    except OSError as e:
+        sock.close()
+        return []
+
+    results = {}
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            data, addr = sock.recvfrom(1024)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        try:
+            info = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        room = info.get("room")
+        port = info.get("port")
+        if not room or not port:
+            continue
+        
+        key = (addr[0], port)
+        results[key] = {
+            "host": addr[0],
+            "port": port,
+            "room": room,
+            "has_password": bool(info.get("has_password", False)),
+            "is_verified": bool(info.get("is_verified", False)),
+            "domain_restriction": info.get("domain_restriction", "")
+        }
+    sock.close()
+    return list(results.values())
+
+
+def send_verification_email(sender_email, app_password, recipient_email, code, subject_prefix="LAN-Link"):
+    """Helper function to send a 2FA verification email using Gmail SMTP."""
+    msg = EmailMessage()
+    msg["Subject"] = f"{subject_prefix} Verification Code"
+    msg["From"] = sender_email
+    msg["To"] = recipient_email
+    msg.set_content(
+        f"Your LAN-Link 2-Step verification code is:\n\n{code}\n\n"
+        "This code expires shortly. Do not share it with anyone."
+    )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(sender_email, app_password)
+        smtp.send_message(msg)
+
+
+class RoomServer:
+    """Pure networking: owns the TCP room socket, discovery responder, and registry for P2P files."""
+
+    def __init__(self, room_name, password, is_verified=False, domain_restriction="", smtp_sender="", smtp_password=""):
+        self.room_name = room_name
+        self.password = password
+        self.is_verified = is_verified
+        self.domain_restriction = domain_restriction.strip().lower()
+        self.smtp_sender = smtp_sender.strip()
+        self.smtp_password = smtp_password.strip()
+        
+        self.socket = None
+        self.discovery_socket = None
+        self.port = None
+        self.clients = {}          # socket -> {"username": str, "email": str, "ip": str}
+        self.host_socket = None
+        self.banned_emails = set()
+        self.banned_ips = set()
+        self.banned_usernames = set()
+
+        # File sharing registry (stores owner IP and direct file port)
+        self.shared_files = {}     # file_id (int) -> {"owner_sock": sock, "owner_name": str, "owner_ip": str, "file_port": int, "filename": str, "filesize": int}
+        self.next_file_id = 1
+        
+        self.lock = threading.Lock()
+        self.running = False
+
+    def start(self):
+        sock, port = get_next_available_port()
+        if sock is None or port is None:
+            return None
+
+        try:
+            sock.listen()
+            self.socket = sock
+            self.port = port
+        except OSError as e:
+            sock.close()
+            return None
+
+        self.running = True
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+        threading.Thread(target=self._discovery_responder, daemon=True).start()
+        return self.port
+
+    def stop(self):
+        self.running = False
+        with self.lock:
+            for sock in list(self.clients.keys()):
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self.clients.clear()
+        if self.socket:
+            try:
+                self.socket.close()
+            except OSError:
+                pass
+            self.socket = None
+
+    def _discovery_responder(self):
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            udp_sock.bind(("0.0.0.0", DISCOVERY_PORT))
+        except OSError:
+            return
+        self.discovery_socket = udp_sock
+        udp_sock.settimeout(1.0)
+
+        while self.running:
+            try:
+                data, addr = udp_sock.recvfrom(1024)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if data == b"CHATROOM_DISCOVER_V1":
+                reply = json.dumps({
+                    "room": self.room_name,
+                    "port": self.port,
+                    "has_password": bool(self.password),
+                    "is_verified": self.is_verified,
+                    "domain_restriction": self.domain_restriction
+                }).encode("utf-8")
+                try:
+                    udp_sock.sendto(reply, addr)
+                except OSError:
+                    pass
+        udp_sock.close()
+
+    def _accept_loop(self):
+        while self.running:
+            try:
+                sock, addr = self.socket.accept()
+            except OSError:
+                break
+            threading.Thread(target=self._handle_client, args=(sock, addr), daemon=True).start()
+
+    def _broadcast(self, message, exclude=None):
+        with self.lock:
+            dead = []
+            for sock in self.clients:
+                if sock is exclude:
+                    continue
+                try:
+                    sock.sendall(message.encode("utf-8") if isinstance(message, str) else message)
+                except OSError:
+                    dead.append(sock)
+            for sock in dead:
+                self._cleanup_disconnected_client_locked(sock)
+
+    def _cleanup_disconnected_client_locked(self, sock):
+        self.clients.pop(sock, None)
+        if self.host_socket == sock:
+            self.host_socket = None
+        # Remove files owned by this client
+        to_remove = [fid for fid, info in self.shared_files.items() if info["owner_sock"] == sock]
+        for fid in to_remove:
+            removed = self.shared_files.pop(fid, None)
+            if removed:
+                _, ext = os.path.splitext(removed['filename'])
+                ext_label = ext if ext else "no ext"
+                self._broadcast(f"** File '{removed['filename']}' (ID {fid} [{ext_label}]) removed because owner disconnected **\n")
+
+    def _handle_client(self, sock, addr):
+        if addr[0] in self.banned_ips:
+            sock.sendall(b"REJECT:You are banned from this room.\n")
+            sock.close()
+            return
+
+        username = None
+        user_email = "Guest (Unverified)"
+        was_member = False
+        try:
+            sock.sendall(b"ROOM_NAME:")
+            submitted_room = sock.recv(1024).decode("utf-8").strip()
+            if submitted_room != self.room_name:
+                sock.sendall(b"REJECT:Wrong room name\n")
+                return
+
+            sock.sendall(b"ROOM_PASSWORD:")
+            submitted_pw = sock.recv(1024).decode("utf-8").strip()
+            if submitted_pw != self.password:
+                sock.sendall(b"REJECT:Wrong password\n")
+                return
+
+            if self.is_verified:
+                sock.sendall(b"NEED_EMAIL:")
+                user_email = sock.recv(1024).decode("utf-8").strip().lower()
+
+                if not user_email or user_email.startswith("guest"):
+                    sock.sendall(b"REJECT:This server requires a verified email address.\n")
+                    return
+                
+                if user_email in self.banned_emails:
+                    sock.sendall(b"REJECT:Your email is banned from this room.\n")
+                    return
+                
+                if self.domain_restriction:
+                    if "@" in self.domain_restriction and not user_email.endswith(self.domain_restriction) and user_email != self.domain_restriction:
+                        sock.sendall(f"REJECT:Email must match restriction '{self.domain_restriction}'\n".encode("utf-8"))
+                        return
+
+                code = f"{secrets.randbelow(1_000_000):06d}"
+                try:
+                    send_verification_email(self.smtp_sender, self.smtp_password, user_email, code, subject_prefix=self.room_name)
+                except Exception as e:
+                    sock.sendall(f"REJECT:Failed to send verification email ({e})\n".encode("utf-8"))
+                    return
+
+                sock.sendall(b"NEED_CODE:")
+                submitted_code = sock.recv(1024).decode("utf-8").strip()
+                if submitted_code != code:
+                    sock.sendall(b"REJECT:Invalid 2FA verification code\n")
+                    return
+            else:
+                sock.sendall(b"NEED_EMAIL:")
+                recv_email = sock.recv(1024).decode("utf-8").strip()
+                if recv_email:
+                    user_email = recv_email
+
+            sock.sendall(b"OK:Enter your username: ")
+            username = sock.recv(1024).decode("utf-8").strip()
+            if not username:
+                username = f"user_{addr[1]}"
+
+            if username.lower() in self.banned_usernames:
+                sock.sendall(b"REJECT:Your username is banned from this room.\n")
+                sock.close()
+                return
+
+            with self.lock:
+                # Robust host assignment for local connections (127.0.0.1, ::1, localhost)
+                if self.host_socket is None and addr[0] in ("127.0.0.1", "::1", "localhost"):
+                    self.host_socket = sock
+
+                existing_names = [c["username"] for c in self.clients.values()]
+                if username in existing_names:
+                    username = f"{username}_{addr[1]}"
+                self.clients[sock] = {"username": username, "email": user_email, "ip": addr[0]}
+                was_member = True
+
+            self._broadcast(f"** {username} joined the room **\n", exclude=sock)
+            
+            help_msg = (
+                f"Welcome to '{self.room_name}', {username}!\n"
+                "Commands: /quit, /who, /realname, /share, /files, /download <id>, /clear"
+            )
+            if sock == self.host_socket:
+                help_msg += ", /kick <user>, /ban <user/email> (Host Only)"
+            sock.sendall((help_msg + "\n").encode("utf-8"))
+
+            f_in = sock.makefile('r', encoding='utf-8', errors='ignore')
+            for line in f_in:
+                if not self.running:
+                    break
+                
+                text = line.strip()
+                if not text:
+                    continue
+
+                # Handle clear chat command
+                if text.startswith("/clear") or text.startswith("/clearchat"):
+                    with self.lock:
+                        names = ", ".join([c["username"] for c in self.clients.values()])
+                    cleared_help = (
+                        f"Welcome to '{self.room_name}', {username}!\n"
+                        "Commands: /quit, /who, /realname, /share, /files, /download <id>, /clear"
+                    )
+                    if sock == self.host_socket:
+                        cleared_help += ", /kick <user>, /ban <user/email> (Host Only)"
+                    sock.sendall(f"CLEAR_CHAT_TRIGGER\n{cleared_help}\nOnline: {names}\n".encode("utf-8"))
+                    continue
+
+                # Handle direct P2P file share registration
+                if text.startswith("__SHARE_REGISTER__:"):
+                    parts = text.split(":", 3)
+                    if len(parts) == 4:
+                        filename = parts[1]
+                        try:
+                            filesize = int(parts[2])
+                            file_port = int(parts[3])
+                        except ValueError:
+                            filesize = 0
+                            file_port = 0
+                        
+                        _, ext = os.path.splitext(filename)
+                        ext_label = ext if ext else "no ext"
+
+                        with self.lock:
+                            fid = self.next_file_id
+                            self.next_file_id += 1
+                            self.shared_files[fid] = {
+                                "owner_sock": sock,
+                                "owner_name": username,
+                                "owner_ip": addr[0],
+                                "file_port": file_port,
+                                "filename": filename,
+                                "filesize": filesize
+                            }
+                        self._broadcast(f"** [File Available] {username} shared '{filename}' (ID {fid} [{ext_label}], Size: {filesize} bytes). Type /download {fid} to get it. **\n", exclude=sock)
+                        sock.sendall(f"FILE_REGISTERED:{fid}:{filename}\n".encode("utf-8"))
+                    continue
+
+                if text.startswith("/files"):
+                    with self.lock:
+                        if not self.shared_files:
+                            sock.sendall(b"No files currently shared in this room.\n")
+                        else:
+                            file_list_str = "[Shared Files in Room]\n"
+                            for fid, info in self.shared_files.items():
+                                _, ext = os.path.splitext(info['filename'])
+                                ext_label = ext if ext else "no ext"
+                                file_list_str += f"  ID {fid} ({ext_label}): '{info['filename']}' (Shared by {info['owner_name']}, {info['filesize']} bytes)\n"
+                            sock.sendall(file_list_str.encode("utf-8"))
+                    continue
+
+                if text.startswith("/download "):
+                    parts = text.split(" ", 1)
+                    if len(parts) == 2:
+                        try:
+                            fid = int(parts[1].strip())
+                        except ValueError:
+                            sock.sendall(b"Error: Invalid File ID.\n")
+                            continue
+                        
+                        owner_ip = None
+                        file_port = None
+                        filename = ""
+                        with self.lock:
+                            if fid in self.shared_files:
+                                owner_ip = self.shared_files[fid]["owner_ip"]
+                                file_port = self.shared_files[fid]["file_port"]
+                                filename = self.shared_files[fid]["filename"]
+
+                        if not owner_ip or not file_port:
+                            sock.sendall(b"Error: File not found or owner is offline.\n")
+                        else:
+                            sock.sendall(f"FILE_HOST_INFO:{fid}:{owner_ip}:{file_port}:{filename}\n".encode("utf-8"))
+                    continue
+
+                if text.startswith("/quit"):
+                    break
+                if text.startswith("/who"):
+                    with self.lock:
+                        names = ", ".join([c["username"] for c in self.clients.values()])
+                    sock.sendall(f"Online: {names}\n".encode("utf-8"))
+                    continue
+                if text.startswith("/realname"):
+                    with self.lock:
+                        realnames = [f" - {c['username']}: {c['email']}" for c in self.clients.values()]
+                    list_str = "\n".join(realnames)
+                    sock.sendall(f"[Verified Email List]\n{list_str}\n".encode("utf-8"))
+                    continue
+
+                if text.startswith("/kick "):
+                    if sock != self.host_socket:
+                        sock.sendall(b"Error: Only the host can use /kick.\n")
+                        continue
+                    target_query = text[6:].strip().lower()
+                    target_sock = None
+                    target_name = ""
+                    with self.lock:
+                        # Exact match
+                        for s, info in self.clients.items():
+                            if info["username"].lower() == target_query:
+                                target_sock = s
+                                target_name = info["username"]
+                                break
+                        # Partial/prefix match if exact not found
+                        if not target_sock:
+                            for s, info in self.clients.items():
+                                if info["username"].lower().startswith(target_query):
+                                    target_sock = s
+                                    target_name = info["username"]
+                                    break
+
+                    if target_sock and target_sock != self.host_socket:
+                        try:
+                            target_sock.sendall(b"REJECT:You have been kicked from the room.\n")
+                            target_sock.close()
+                        except OSError:
+                            pass
+                        self._broadcast(f"** {target_name} was kicked by the host **\n")
+                        sock.sendall(f"Successfully kicked {target_name}.\n".encode("utf-8"))
+                    else:
+                        sock.sendall(f"User '{target_query}' not found or cannot kick host.\n".encode("utf-8"))
+                    continue
+
+                if text.startswith("/ban "):
+                    if sock != self.host_socket:
+                        sock.sendall(b"Error: Only the host can use /ban.\n")
+                        continue
+                    target_query = text[5:].strip().lower()
+                    target_sock = None
+                    target_name = ""
+                    with self.lock:
+                        # Exact match for username or email
+                        for s, info in self.clients.items():
+                            if info["username"].lower() == target_query or info["email"].lower() == target_query:
+                                target_sock = s
+                                target_name = info["username"]
+                                self.banned_usernames.add(info["username"].lower())
+                                self.banned_ips.add(info["ip"])
+                                if info["email"]:
+                                    self.banned_emails.add(info["email"].lower())
+                                break
+                        # Partial/prefix match if exact not found
+                        if not target_sock:
+                            for s, info in self.clients.items():
+                                if info["username"].lower().startswith(target_query) or info["email"].lower().startswith(target_query):
+                                    target_sock = s
+                                    target_name = info["username"]
+                                    self.banned_usernames.add(info["username"].lower())
+                                    self.banned_ips.add(info["ip"])
+                                    if info["email"]:
+                                        self.banned_emails.add(info["email"].lower())
+                                    break
+
+                    if target_sock and target_sock != self.host_socket:
+                        try:
+                            target_sock.sendall(b"REJECT:You have been banned from this room.\n")
+                            target_sock.close()
+                        except OSError:
+                            pass
+                        self._broadcast(f"** {target_name} was banned by the host **\n")
+                        sock.sendall(f"Successfully banned {target_name}.\n".encode("utf-8"))
+                    else:
+                        sock.sendall(f"User or email '{target_query}' not found or cannot ban host.\n".encode("utf-8"))
+                    continue
+
+                timestamp = time.strftime("%H:%M:%S")
+                self._broadcast(f"[{timestamp}] {username}: {text}\n")
+
+        except (ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        finally:
+            with self.lock:
+                self._cleanup_disconnected_client_locked(sock)
+            try:
+                sock.close()
+            except OSError:
+                pass
+            if username and was_member:
+                self._broadcast(f"** {username} left the room **\n")
+
+
+class ChatApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("LAN-Link V1.0.2")
+        self.root.geometry("580x670")
+        self.root.minsize(480, 520)
+
+        self.sock = None
+        self.connected = False
+        self.is_host = False
+        self.room_server = None
+        self.event_queue = queue.Queue()
+        
+        self.user_email = ""
+        self.is_user_verified = False
+
+        # Direct P2P File Server Listener Setup (Dual-stack robust for Linux/Windows/Thonny)
+        self.my_shared_files = {}      # file_id -> absolute file path
+        self.pending_share_filepath = None
+        
+        try:
+            self.file_server_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            self.file_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self.file_server_socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except (AttributeError, OSError):
+                pass
+            self.file_server_socket.bind(("::", 0))
+        except OSError:
+            self.file_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.file_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.file_server_socket.bind(("0.0.0.0", 0))
+
+        self.file_server_port = self.file_server_socket.getsockname()[1]
+        threading.Thread(target=self._file_server_accept_loop, daemon=True).start()
+
+        self.all_discovered_rooms = []
+        self.filtered_rooms = []
+        self.displayed_rooms = []
+        self.rooms_loaded_count = 0
+        self.selected_room = None
+
+        self._build_debug_window()
+
+        # Bottom Footer Frame for Version Number & Debug Button
+        footer_frame = ttk.Frame(self.root, padding=(10, 2))
+        footer_frame.pack(side="bottom", fill="x")
+
+        self.version_lbl = ttk.Label(footer_frame, text="LAN-Link V1.0.2", font=("", 9, "bold"), foreground="gray")
+        self.version_lbl.pack(side="left")
+
+        self.debug_btn = ttk.Button(footer_frame, text="🐞 Toggle Debug Console", command=self._toggle_debug)
+        self.debug_btn.pack(side="right")
+
+        self._build_home_frame()
+        self._build_host_frame()
+        self._build_search_frame()
+        self._build_join_frame()
+        self._build_chat_frame()
+        self._show_home()
+
+        self.root.after(100, self._drain_queue)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _file_server_accept_loop(self):
+        """Accepts incoming direct P2P socket connections from other peers downloading files."""
+        while True:
+            try:
+                sock, addr = self.file_server_socket.accept()
+                threading.Thread(target=self._handle_direct_upload, args=(sock,), daemon=True).start()
+            except OSError:
+                break
+
+    def _handle_direct_upload(self, sock):
+        """Streams file bytes directly to the peer, then closes instantly."""
+        try:
+            sock.settimeout(5.0)
+            req = sock.recv(1024).decode("utf-8").strip()
+            sock.settimeout(None)
+
+            if req.startswith("GET_FILE:"):
+                fid = int(req.split(":", 1)[1])
+                filepath = self.my_shared_files.get(fid)
+                if filepath and os.path.exists(filepath):
+                    with open(filepath, "rb") as f:
+                        while True:
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
+                            sock.sendall(chunk)
+        except Exception as e:
+            print(f"[P2P Server] Error uploading file: {e}")
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _build_debug_window(self):
+        self.debug_window = tk.Toplevel(self.root)
+        self.debug_window.title("Debug Console")
+        self.debug_window.geometry("550x400")
+        self.debug_window.withdraw()
+        self.debug_window.protocol("WM_DELETE_WINDOW", self.debug_window.withdraw)
+
+        self.debug_text = scrolledtext.ScrolledText(self.debug_window, state="disabled", wrap="word", font=("Consolas", 9))
+        self.debug_text.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        class StdoutRedirector:
+            def __init__(self, eq):
+                self.eq = eq
+            def write(self, msg):
+                if msg:
+                    self.eq.put(("debug", msg))
+            def flush(self): pass
+            
+        sys.stdout = StdoutRedirector(self.event_queue)
+        sys.stderr = sys.stdout
+
+    def _toggle_debug(self):
+        if self.debug_window.state() == "withdrawn":
+            self.debug_window.deiconify()
+        else:
+            self.debug_window.withdraw()
+
+    def _build_home_frame(self):
+        self.home_frame = ttk.Frame(self.root, padding=25)
+        
+        title_frame = ttk.Frame(self.home_frame)
+        title_frame.pack(pady=(10, 2))
+        
+        lbl_lan = tk.Label(title_frame, text="LAN", font=("", 20, "bold"), fg="#FFD43B", bg=self.root.cget("bg"))
+        lbl_lan.pack(side="left")
+        lbl_dash = tk.Label(title_frame, text="-", font=("", 20, "bold"), fg="gray", bg=self.root.cget("bg"))
+        lbl_dash.pack(side="left")
+        lbl_link = tk.Label(title_frame, text="Link", font=("", 20, "bold"), fg="#306998", bg=self.root.cget("bg"))
+        lbl_link.pack(side="left")
+
+        ttk.Label(self.home_frame, text="made by Daniel Cave", font=("", 9, "italic"), foreground="gray").pack(pady=(0, 2))
+        ttk.Label(self.home_frame, text="Code licensed under the Daniel Cave Personal-Use License (DPUL-1.0)", font=("", 8), foreground="#555555").pack(pady=(0, 15))
+
+        self.account_card = ttk.LabelFrame(self.home_frame, text=" Account Status ", padding=12)
+        self.account_card.pack(fill="x", pady=(0, 20))
+
+        self.account_status_var = tk.StringVar(value="Current Status: Guest (Unverified)")
+        ttk.Label(self.account_card, textvariable=self.account_status_var, font=("", 10, "bold")).pack(anchor="w")
+
+        btn_box = ttk.Frame(self.account_card)
+        btn_box.pack(fill="x", pady=(8, 0))
+
+        self.verify_email_btn = ttk.Button(btn_box, text="Verify Email via 2FA", command=self._prompt_verify_email)
+        self.verify_email_btn.pack(side="left")
+        
+        self.guest_toggle_btn = ttk.Button(btn_box, text="Switch to Guest Mode", command=self._switch_to_guest)
+        self.guest_toggle_btn.pack(side="left", padx=(6, 0))
+
+        ttk.Label(self.home_frame, text="Chat & direct P2P share files with anyone on your local network.", foreground="gray").pack(pady=(0, 15))
+        ttk.Button(self.home_frame, text="Host a Room", command=self._show_host).pack(fill="x", ipady=8, pady=6)
+        ttk.Button(self.home_frame, text="Join a Room", command=self._enter_search).pack(fill="x", ipady=8, pady=6)
+
+    def _prompt_verify_email(self):
+        recipient_email = simpledialog.askstring("Account Verification", "Enter your email address to verify:", parent=self.root)
+        if not recipient_email or "@" not in recipient_email:
+            if recipient_email is not None:
+                messagebox.showerror("Error", "Please enter a valid email address.")
+            return
+
+        smtp_sender = simpledialog.askstring("SMTP Sender Email", "Enter sender Gmail address (to send OTP):", parent=self.root)
+        if not smtp_sender:
+            return
+
+        smtp_password = simpledialog.askstring("SMTP App Password", "Enter 16-character Gmail App Password:", show="*", parent=self.root)
+        if not smtp_password:
+            return
+
+        recipient_email = recipient_email.strip().lower()
+        generated_code = f"{secrets.randbelow(1_000_000):06d}"
+
+        try:
+            send_verification_email(smtp_sender, smtp_password, recipient_email, generated_code)
+            messagebox.showinfo("Email Sent", f"A 6-digit verification code was sent to {recipient_email}.\nPlease check your inbox/spam folder.")
+        except Exception as e:
+            messagebox.showerror("Failed to Send Email", f"SMTP Error: {e}\n\nMake sure 2FA is on and you are using a 16-character Gmail App Password.")
+            return
+
+        user_entered_code = simpledialog.askstring("Enter 2FA Code", f"Enter the 6-digit verification code sent to {recipient_email}:", parent=self.root)
+        
+        if user_entered_code and user_entered_code.strip() == generated_code:
+            self.user_email = recipient_email
+            self.is_user_verified = True
+            self.account_status_var.set(f"Current Status: Verified ({self.user_email})")
+            messagebox.showinfo("Success", f"Verification Successful! You are now logged in as {self.user_email}.")
+        else:
+            messagebox.showerror("Verification Failed", "Incorrect 2FA code entered. Verification aborted.")
+
+    def _switch_to_guest(self):
+        self.user_email = ""
+        self.is_user_verified = False
+        self.account_status_var.set("Current Status: Guest (Unverified)")
+        messagebox.showinfo("Guest Mode", "Switched to Guest Mode.")
+
+    def _build_host_frame(self):
+        self.host_frame = ttk.Frame(self.root, padding=20)
+        ttk.Label(self.host_frame, text="Host a Room", font=("", 12, "bold")).pack(anchor="w", pady=(0, 12))
+
+        fields = ttk.Frame(self.host_frame)
+        fields.pack(fill="x")
+
+        ttk.Label(fields, text="Room name:").grid(row=0, column=0, sticky="w", pady=3)
+        self.host_room_entry = ttk.Entry(fields)
+        self.host_room_entry.insert(0, "My Room")
+        self.host_room_entry.grid(row=0, column=1, sticky="ew", pady=3)
+
+        ttk.Label(fields, text="Password (optional):").grid(row=1, column=0, sticky="w", pady=3)
+        self.host_pw_entry = ttk.Entry(fields, show="*")
+        self.host_pw_entry.grid(row=1, column=1, sticky="ew", pady=3)
+
+        ttk.Label(fields, text="Your username:").grid(row=2, column=0, sticky="w", pady=3)
+        self.host_username_entry = ttk.Entry(fields)
+        self.host_username_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+        self.is_verified_var = tk.BooleanVar(value=False)
+        self.verified_chk = ttk.Checkbutton(fields, text="Verified Server (Requires 2FA for Joiners)", variable=self.is_verified_var, command=self._toggle_host_verified_options)
+        self.verified_chk.grid(row=3, column=0, columnspan=2, sticky="w", pady=6)
+
+        self.domain_label = ttk.Label(fields, text="Allowed Domain/Email (Optional):")
+        self.domain_label.grid(row=4, column=0, sticky="w", pady=3)
+        self.domain_entry = ttk.Entry(fields)
+        self.domain_entry.grid(row=4, column=1, sticky="ew", pady=3)
+
+        self.smtp_email_label = ttk.Label(fields, text="Sender Email (Host Gmail):")
+        self.smtp_email_label.grid(row=5, column=0, sticky="w", pady=3)
+        self.smtp_email_entry = ttk.Entry(fields)
+        self.smtp_email_entry.grid(row=5, column=1, sticky="ew", pady=3)
+
+        self.smtp_pw_label = ttk.Label(fields, text="Gmail App Password:")
+        self.smtp_pw_label.grid(row=6, column=0, sticky="w", pady=3)
+        self.smtp_pw_entry = ttk.Entry(fields, show="*")
+        self.smtp_pw_entry.grid(row=6, column=1, sticky="ew", pady=3)
+
+        fields.columnconfigure(1, weight=1)
+
+        self.host_status_var = tk.StringVar(value="")
+        ttk.Label(self.host_frame, textvariable=self.host_status_var, foreground="red").pack(pady=(10, 0))
+
+        btns = ttk.Frame(self.host_frame)
+        btns.pack(pady=10)
+        ttk.Button(btns, text="Back", command=self._show_home).pack(side="left")
+        self.start_hosting_btn = ttk.Button(btns, text="Start Hosting", command=self.start_hosting)
+        self.start_hosting_btn.pack(side="left", padx=(6, 0))
+
+        self._toggle_host_verified_options()
+
+    def _toggle_host_verified_options(self):
+        if self.is_verified_var.get():
+            self.domain_label.grid()
+            self.domain_entry.grid()
+            self.smtp_email_label.grid()
+            self.smtp_email_entry.grid()
+            self.smtp_pw_label.grid()
+            self.smtp_pw_entry.grid()
+            if self.is_user_verified and not self.smtp_email_entry.get():
+                self.smtp_email_entry.insert(0, self.user_email)
+        else:
+            self.domain_label.grid_remove()
+            self.domain_entry.grid_remove()
+            self.smtp_email_label.grid_remove()
+            self.smtp_email_entry.grid_remove()
+            self.smtp_pw_label.grid_remove()
+            self.smtp_pw_entry.grid_remove()
+
+    def _build_search_frame(self):
+        self.search_frame = ttk.Frame(self.root, padding=16)
+
+        header = ttk.Frame(self.search_frame)
+        header.pack(fill="x")
+        ttk.Label(header, text="Rooms on your network", font=("", 12, "bold")).pack(side="left")
+        self.search_btn = ttk.Button(header, text="Refresh Search", command=self.search_rooms)
+        self.search_btn.pack(side="right")
+
+        self.search_status_var = tk.StringVar(value="")
+        ttk.Label(self.search_frame, textvariable=self.search_status_var, foreground="gray").pack(anchor="w", pady=(4, 4))
+
+        filter_frame = ttk.Frame(self.search_frame)
+        filter_frame.pack(fill="x", pady=(0, 8))
+        ttk.Label(filter_frame, text="Filter by name:").pack(side="left")
+        self.room_filter_var = tk.StringVar()
+        self.room_filter_var.trace_add("write", lambda *args: self._apply_filter())
+        self.room_filter_entry = ttk.Entry(filter_frame, textvariable=self.room_filter_var)
+        self.room_filter_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        list_container = ttk.Frame(self.search_frame)
+        list_container.pack(fill="both", expand=True)
+        
+        self.load_more_btn = ttk.Button(list_container, text="Load 25 More", command=self._load_more_rooms)
+        
+        list_box_frame = ttk.Frame(list_container)
+        list_box_frame.pack(fill="both", expand=True, side="top", pady=(0, 4))
+        self.rooms_listbox = tk.Listbox(list_box_frame, activestyle="dotbox")
+        self.rooms_listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_box_frame, command=self.rooms_listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.rooms_listbox.configure(yscrollcommand=scrollbar.set)
+        self.rooms_listbox.bind("<Double-Button-1>", lambda e: self.select_room())
+
+        btns = ttk.Frame(self.search_frame)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Back", command=self._show_home).pack(side="left")
+        ttk.Button(btns, text="Join Selected Room", command=self.select_room).pack(side="right")
+
+    def _build_join_frame(self):
+        self.join_frame = ttk.Frame(self.root, padding=20)
+
+        self.join_room_label_var = tk.StringVar(value="")
+        ttk.Label(self.join_frame, textvariable=self.join_room_label_var, font=("", 12, "bold")).pack(anchor="w", pady=(0, 12))
+
+        fields = ttk.Frame(self.join_frame)
+        fields.pack(fill="x")
+
+        self.pw_label = ttk.Label(fields, text="Room password:")
+        self.pw_label.grid(row=0, column=0, sticky="w", pady=4)
+        self.pw_entry = ttk.Entry(fields, show="*")
+        self.pw_entry.grid(row=0, column=1, sticky="ew", pady=4)
+
+        self.join_email_label = ttk.Label(fields, text="Your Email (2FA):")
+        self.join_email_label.grid(row=1, column=0, sticky="w", pady=4)
+        self.join_email_entry = ttk.Entry(fields)
+        self.join_email_entry.grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(fields, text="Your username:").grid(row=2, column=0, sticky="w", pady=4)
+        self.username_entry = ttk.Entry(fields)
+        self.username_entry.grid(row=2, column=1, sticky="ew", pady=4)
+
+        fields.columnconfigure(1, weight=1)
+
+        self.join_status_var = tk.StringVar(value="")
+        ttk.Label(self.join_frame, textvariable=self.join_status_var, foreground="red").pack(pady=(10, 0))
+
+        btns = ttk.Frame(self.join_frame)
+        btns.pack(pady=10)
+        ttk.Button(btns, text="Back", command=self._show_search).pack(side="left")
+        self.confirm_join_btn = ttk.Button(btns, text="Join Room", command=self.confirm_join)
+        self.confirm_join_btn.pack(side="left", padx=(6, 0))
+
+    def _build_chat_frame(self):
+        self.chat_frame = ttk.Frame(self.root)
+
+        header = ttk.Frame(self.chat_frame, padding=(10, 6))
+        header.pack(fill="x")
+        self.header_var = tk.StringVar(value="")
+        ttk.Label(header, textvariable=self.header_var, font=("", 10, "bold")).pack(side="left")
+        ttk.Button(header, text="Who's online", command=self.request_who).pack(side="right")
+        self.leave_btn = ttk.Button(header, text="Leave", command=self.leave_room)
+        self.leave_btn.pack(side="right", padx=(0, 6))
+
+        body = ttk.Frame(self.chat_frame, padding=(10, 0, 10, 10))
+        body.pack(fill="both", expand=True)
+        self.chat_box = scrolledtext.ScrolledText(body, state="disabled", wrap="word")
+        self.chat_box.pack(fill="both", expand=True)
+
+        entry_frame = ttk.Frame(self.chat_frame, padding=(10, 0, 10, 10))
+        entry_frame.pack(fill="x")
+        self.msg_entry = ttk.Entry(entry_frame)
+        self.msg_entry.pack(side="left", fill="x", expand=True)
+        self.msg_entry.bind("<Return>", lambda event: self.send_message())
+        ttk.Button(entry_frame, text="Send", command=self.send_message).pack(side="left", padx=(6, 0))
+
+    def _hide_all(self):
+        for frame in (self.home_frame, self.host_frame, self.search_frame, self.join_frame, self.chat_frame):
+            frame.pack_forget()
+
+    def _show_home(self):
+        self._hide_all()
+        self.host_status_var.set("")
+        self.home_frame.pack(fill="both", expand=True)
+
+    def _show_host(self):
+        self._hide_all()
+        self.host_status_var.set("")
+        self.host_frame.pack(fill="both", expand=True)
+
+    def _enter_search(self):
+        self._hide_all()
+        self.search_frame.pack(fill="both", expand=True)
+        self.search_rooms()
+
+    def _show_search(self):
+        self._hide_all()
+        self.search_frame.pack(fill="both", expand=True)
+
+    def _show_join(self):
+        self._hide_all()
+        self.join_frame.pack(fill="both", expand=True)
+
+    def _show_chat(self):
+        self._hide_all()
+        self.leave_btn.configure(text="Close Room" if self.is_host else "Leave")
+        self.chat_frame.pack(fill="both", expand=True)
+        self.msg_entry.focus_set()
+
+    def _append_chat(self, text):
+        self.chat_box.configure(state="normal")
+        self.chat_box.insert("end", text if text.endswith("\n") else text + "\n")
+        self.chat_box.see("end")
+        self.chat_box.configure(state="disabled")
+
+    def _drain_queue(self):
+        try:
+            while True:
+                kind, payload = self.event_queue.get_nowait()
+                if kind == "debug":
+                    self.debug_text.configure(state="normal")
+                    self.debug_text.insert("end", payload)
+                    self.debug_text.see("end")
+                    self.debug_text.configure(state="disabled")
+                elif kind == "rooms_found":
+                    self._populate_rooms(payload)
+                elif kind == "chat":
+                    self._append_chat(payload)
+                elif kind == "clear_chat":
+                    self.chat_box.configure(state="normal")
+                    self.chat_box.delete("1.0", "end")
+                    self.chat_box.configure(state="disabled")
+                elif kind == "join_error":
+                    self.join_status_var.set(payload)
+                    self.confirm_join_btn.configure(state="normal")
+                elif kind == "host_error":
+                    self.host_status_var.set(payload)
+                    self.start_hosting_btn.configure(state="normal")
+                elif kind == "joined":
+                    room, username = payload
+                    label = f"Hosting: {room}" if self.is_host else f"Room: {room}"
+                    self.header_var.set(f"{label}  |  You are: {username}")
+                    self._show_chat()
+                elif kind == "disconnected":
+                    if self.connected:
+                        self.connected = False
+                        messagebox.showinfo("Disconnected", payload)
+                        self._reset_to_home()
+        except queue.Empty:
+            pass
+        self.root.after(100, self._drain_queue)
+
+    def search_rooms(self):
+        self.search_status_var.set("Searching for rooms...")
+        self.search_btn.configure(state="disabled")
+        self.rooms_listbox.delete(0, "end")
+        self.load_more_btn.pack_forget()
+        threading.Thread(target=self._search_rooms_bg, daemon=True).start()
+
+    def _search_rooms_bg(self):
+        rooms = discover_rooms()
+        self.event_queue.put(("rooms_found", rooms))
+
+    def _populate_rooms(self, rooms):
+        self.all_discovered_rooms = rooms
+        self._apply_filter()
+        self.search_btn.configure(state="normal")
+
+    def _apply_filter(self):
+        query = self.room_filter_var.get().strip().lower()
+        if query:
+            self.filtered_rooms = [r for r in self.all_discovered_rooms if query in r["room"].lower()]
+        else:
+            self.filtered_rooms = self.all_discovered_rooms.copy()
+            
+        self.rooms_loaded_count = 0
+        self.displayed_rooms = []
+        self.rooms_listbox.delete(0, "end")
+        self.load_more_btn.pack_forget()
+
+        if not self.all_discovered_rooms:
+            self.search_status_var.set("No rooms found.")
+        else:
+            self.search_status_var.set(f"Found {len(self.all_discovered_rooms)} room(s).")
+            self._load_more_rooms()
+
+    def _load_more_rooms(self):
+        start = self.rooms_loaded_count
+        end = start + 25
+        chunk = self.filtered_rooms[start:end]
+        
+        for room in chunk:
+            self.displayed_rooms.append(room)
+            tags = []
+            if room["has_password"]: tags.append("🔒 Password")
+            if room["is_verified"]: tags.append("✓ Verified")
+            tag_str = f"  ({', '.join(tags)})" if tags else ""
+            self.rooms_listbox.insert("end", room["room"] + tag_str)
+            
+        self.rooms_loaded_count += len(chunk)
+        
+        if self.rooms_loaded_count < len(self.filtered_rooms):
+            self.load_more_btn.pack(side="bottom", fill="x")
+        else:
+            self.load_more_btn.pack_forget()
+
+    def select_room(self):
+        selection = self.rooms_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("Pick a room", "Select a room from the list first.")
+            return
+        
+        self.selected_room = self.displayed_rooms[selection[0]]
+        self.join_room_label_var.set(f"Joining: {self.selected_room['room']}")
+        self.join_status_var.set("")
+        self.pw_entry.delete(0, "end")
+        self.join_email_entry.delete(0, "end")
+        self.username_entry.delete(0, "end")
+
+        if self.is_user_verified:
+            self.join_email_entry.insert(0, self.user_email)
+
+        if self.selected_room["has_password"]:
+            self.pw_label.grid()
+            self.pw_entry.grid()
+        else:
+            self.pw_label.grid_remove()
+            self.pw_entry.grid_remove()
+
+        if self.selected_room["is_verified"]:
+            self.join_email_label.grid()
+            self.join_email_entry.grid()
+        else:
+            self.join_email_label.grid_remove()
+            self.join_email_entry.grid_remove()
+
+        self._show_join()
+
+    def start_hosting(self):
+        room = self.host_room_entry.get().strip()
+        if not room:
+            self.host_status_var.set("Room name is required.")
+            return
+        username = self.host_username_entry.get().strip()
+        if not username:
+            self.host_status_var.set("Username is required.")
+            return
+
+        is_verified = self.is_verified_var.get()
+        domain_rest = self.domain_entry.get().strip()
+        smtp_sender = self.smtp_email_entry.get().strip()
+        smtp_pw = self.smtp_pw_entry.get().strip()
+
+        if is_verified and (not smtp_sender or not smtp_pw):
+            self.host_status_var.set("Sender Email & App Password required for Verified Server.")
+            return
+
+        password = self.host_pw_entry.get()
+
+        self.host_status_var.set("Starting room...")
+        self.start_hosting_btn.configure(state="disabled")
+        threading.Thread(
+            target=self._start_hosting_bg,
+            args=(room, password, username, is_verified, domain_rest, smtp_sender, smtp_pw),
+            daemon=True
+        ).start()
+
+    def _start_hosting_bg(self, room, password, username, is_verified, domain_rest, smtp_sender, smtp_pw):
+        server = RoomServer(room, password, is_verified, domain_rest, smtp_sender, smtp_pw)
+        port = server.start()
+        if port is None:
+            self.event_queue.put(("host_error", "Failed to bind network port."))
+            return
+
+        self.room_server = server
+        self.is_host = True
+        
+        host_email = self.user_email if self.is_user_verified else "Server-Host"
+        self._connect_and_login("127.0.0.1", port, room, password, username, user_email=host_email, is_host_error_target="host_error")
+
+    def confirm_join(self):
+        if not self.selected_room:
+            return
+        username = self.username_entry.get().strip()
+        if not username:
+            self.join_status_var.set("Username is required.")
+            return
+        
+        user_email = self.join_email_entry.get().strip()
+        if self.selected_room["is_verified"] and not user_email:
+            self.join_status_var.set("Email is required for Verified Servers.")
+            return
+
+        password = self.pw_entry.get() if self.selected_room["has_password"] else ""
+
+        self.join_status_var.set("Connecting...")
+        self.confirm_join_btn.configure(state="disabled")
+        self.is_host = False
+        threading.Thread(
+            target=self._connect_and_login,
+            args=(self.selected_room["host"], self.selected_room["port"],
+                  self.selected_room["room"], password, username, user_email),
+            kwargs={"is_host_error_target": "join_error"},
+            daemon=True,
+        ).start()
+
+    def _connect_and_login(self, host, port, room, password, username, user_email="", is_host_error_target="join_error"):
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+
+            sock.recv(1024)
+            sock.sendall((room + "\n").encode("utf-8"))
+
+            reply = sock.recv(1024).decode("utf-8")
+            if reply.startswith("REJECT:"):
+                sock.close()
+                self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
+                return
+            
+            sock.sendall((password + "\n").encode("utf-8"))
+
+            reply = sock.recv(1024).decode("utf-8")
+            if reply.startswith("REJECT:"):
+                sock.close()
+                self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
+                return
+
+            if reply.startswith("NEED_EMAIL:"):
+                sock.sendall((user_email + "\n").encode("utf-8"))
+                
+                reply = sock.recv(1024).decode("utf-8")
+                if reply.startswith("REJECT:"):
+                    sock.close()
+                    self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
+                    return
+
+                if reply.startswith("NEED_CODE:"):
+                    code_val = []
+                    def ask_code():
+                        c = simpledialog.askstring("2FA Verification", f"Enter the 6-digit code sent to {user_email}:", parent=self.root)
+                        code_val.append(c or "")
+
+                    self.root.after(0, ask_code)
+                    while not code_val:
+                        time.sleep(0.1)
+
+                    sock.sendall((code_val[0] + "\n").encode("utf-8"))
+                    reply = sock.recv(1024).decode("utf-8")
+                    if reply.startswith("REJECT:"):
+                        sock.close()
+                        self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
+                        return
+            else:
+                sock.sendall((user_email + "\n").encode("utf-8"))
+            
+            sock.sendall((username + "\n").encode("utf-8"))
+            welcome = sock.recv(1024).decode("utf-8")
+            sock.settimeout(None)
+
+        except (OSError, socket.timeout) as e:
+            self.event_queue.put((is_host_error_target, f"Could not connect: {e}"))
+            return
+
+        self.sock = sock
+        self.connected = True
+        self.event_queue.put(("chat", welcome.strip()))
+        self.event_queue.put(("joined", (room, username)))
+        threading.Thread(target=self._receive_loop, daemon=True).start()
+
+    def _receive_loop(self):
+        try:
+            f_in = self.sock.makefile('r', encoding='utf-8', errors='ignore')
+            for line in f_in:
+                if not self.connected:
+                    break
+                
+                text = line.strip()
+                if not text:
+                    continue
+
+                if text == "CLEAR_CHAT_TRIGGER":
+                    self.event_queue.put(("clear_chat", None))
+                    continue
+
+                if text.startswith("FILE_REGISTERED:"):
+                    parts = text.split(":", 2)
+                    if len(parts) == 3:
+                        fid = int(parts[1])
+                        filename = parts[2]
+                        if self.pending_share_filepath:
+                            self.my_shared_files[fid] = self.pending_share_filepath
+                            self.pending_share_filepath = None
+                            _, ext = os.path.splitext(filename)
+                            ext_label = ext if ext else "no ext"
+                            self.event_queue.put(("chat", f"** You shared '{filename}' successfully (ID {fid} [{ext_label}]) **"))
+                    continue
+
+                if text.startswith("FILE_HOST_INFO:"):
+                    parts = text.split(":", 4)
+                    if len(parts) == 5:
+                        fid = int(parts[1])
+                        owner_ip = parts[2]
+                        file_port = int(parts[3])
+                        filename = parts[4]
+                        self._start_direct_download(owner_ip, file_port, fid, filename)
+                    continue
+
+                self.event_queue.put(("chat", text))
+
+        except OSError:
+            pass
+
+        if self.connected:
+            self.event_queue.put(("disconnected", "Lost connection to the room."))
+
+    def _start_direct_download(self, owner_ip, file_port, fid, filename):
+        def run_download_window():
+            win = tk.Toplevel(self.root)
+            win.title(f"Downloading {filename}")
+            win.geometry("340x130")
+            win.resizable(False, False)
+            win.transient(self.root)
+            win.grab_set()
+
+            lbl = ttk.Label(win, text=f"Connecting directly to peer for '{filename}'...", font=("", 9))
+            lbl.pack(pady=15)
+
+            progress = ttk.Progressbar(win, orient="horizontal", length=280, mode="indeterminate")
+            progress.pack(pady=5)
+            progress.start(10)
+
+            def peer_download_task():
+                try:
+                    s = None
+                    last_err = None
+                    for res in socket.getaddrinfo(owner_ip, file_port, socket.AF_UNSPEC, socket.SOCK_STREAM):
+                        af, socktype, proto, canonname, sa = res
+                        try:
+                            s = socket.socket(af, socktype, proto)
+                            s.settimeout(10)
+                            s.connect(sa)
+                            s.settimeout(None)
+                            break
+                        except OSError as e:
+                            last_err = e
+                            if s:
+                                s.close()
+                            s = None
+                    if s is None:
+                        raise last_err or socket.error("Could not connect to peer")
+
+                    s.sendall(f"GET_FILE:{fid}\n".encode("utf-8"))
+                    
+                    file_bytes = bytearray()
+                    while True:
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            break
+                        file_bytes.extend(chunk)
+                    s.close()
+
+                    def save_and_close():
+                        progress.stop()
+                        win.destroy()
+                        save_path = filedialog.asksaveasfilename(title="Save downloaded file", initialfile=filename, parent=self.root)
+                        if save_path:
+                            try:
+                                with open(save_path, "wb") as f:
+                                    f.write(file_bytes)
+                                self.event_queue.put(("chat", f"** File '{filename}' successfully downloaded directly from peer and saved to {save_path} **"))
+                            except Exception as e:
+                                messagebox.showerror("Error", f"Failed to save file: {e}")
+                    self.root.after(0, save_and_close)
+
+                except Exception as e:
+                    def error_and_close():
+                        progress.stop()
+                        win.destroy()
+                        messagebox.showerror("Download Error", f"Direct P2P download failed: {e}", parent=self.root)
+                    self.root.after(0, error_and_close)
+
+            threading.Thread(target=peer_download_task, daemon=True).start()
+
+        self.root.after(0, run_download_window)
+
+    def send_message(self):
+        if not self.connected or not self.sock:
+            return
+        msg = self.msg_entry.get().strip()
+        if not msg:
+            return
+
+        if msg == "/share":
+            self.msg_entry.delete(0, "end")
+            filepath = filedialog.askopenfilename(title="Select file to share", parent=self.root)
+            if filepath:
+                filename = os.path.basename(filepath)
+                try:
+                    filesize = os.path.getsize(filepath)
+                    self.pending_share_filepath = filepath
+                    self.sock.sendall(f"__SHARE_REGISTER__:{filename}:{filesize}:{self.file_server_port}\n".encode("utf-8"))
+                except Exception as e:
+                    self.event_queue.put(("chat", f"** Error sharing file: {e} **"))
+            return
+
+        try:
+            self.sock.sendall((msg + "\n").encode("utf-8"))
+        except OSError:
+            self.event_queue.put(("disconnected", "Lost connection to the room."))
+            return
+        self.msg_entry.delete(0, "end")
+
+    def request_who(self):
+        if self.connected and self.sock:
+            try:
+                self.sock.sendall(b"/who\n")
+            except OSError:
+                pass
+
+    def leave_room(self):
+        self.connected = False  # Set to False immediately to suppress disconnect alerts
+        if self.sock:
+            try:
+                self.sock.sendall(b"/quit\n")
+            except OSError:
+                pass
+        self._close_socket()
+        if self.is_host and self.room_server:
+            self.room_server.stop()
+            self.room_server = None
+        self.is_host = False
+        self._show_home()
+
+    def _close_socket(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+
+        self.chat_box.configure(state="normal")
+        self.chat_box.delete("1.0", "end")
+        self.chat_box.configure(state="disabled")
+        self.join_status_var.set("")
+        self.host_status_var.set("")
+        self.confirm_join_btn.configure(state="normal")
+        self.start_hosting_btn.configure(state="normal")
+        self.selected_room = None
+        self.my_shared_files.clear()
+        self.pending_share_filepath = None
+
+    def _on_close(self):
+        self.connected = False  # Set to False immediately to suppress disconnect alerts
+        if self.sock:
+            try:
+                self.sock.sendall(b"/quit\n")
+            except OSError:
+                pass
+        self._close_socket()
+        if self.is_host and self.room_server:
+            self.room_server.stop()
+        try:
+            self.file_server_socket.close()
+        except OSError:
+            pass
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    app = ChatApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
+
+# ==========================================
+# LAN-Link V1.0.2
+# License: Daniel Cave Personal-Use License (DPUL-1.0)
+# Copyright (c) 2026 Daniel Cave
+# Personal, private, non-commercial use only.
+# No redistribution, modifications, or public use allowed.
+# ==========================================
