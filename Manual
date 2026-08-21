@@ -1,11 +1,28 @@
 ## How To Set Up Verification ##
+1-A.Go to your google account
+1-B.Go to (https://myaccount.google.com/apppasswords) then go to step 5
 
+2.Select security (left menu)
 
+3.Enable 2-Step verification
 
+4.Click search bar at the top and search App passwords
 
+5.Enter a name for the 16 character password
 
+6.Click create
 
+7.A 16 character code will appear remember that
 
+8.Enter the email you want verified
+
+9.Enter email you got the 16 character passowrd for (Can be same as one you want verified)
+
+10.Enter 16 character code
+
+11.Enter code emailed to you
+
+12.You are now verified
 
 ## Host Commands [Note: Hosts can use all commands ] ##
 /kick <user> #Kicks a user from the room (they can rejoin)
