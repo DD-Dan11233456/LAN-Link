@@ -1,1 +1,42 @@
+## How To Set Up Verification ##
+
+
+
+
+
+
+
+
+## Host Commands [Note: Hosts can use all commands ] ##
+/kick <user> #Kicks a user from the room (they can rejoin)
+/ban <user> #Bans a user from the room for the whole session
+/unban <user> #Unbans a user
+/mute <user> #Stops a user from messaging
+/unmute <user> #Unmutes a user
+/lock #Locks the room from anyone else joining
+/unlock #Unlocks the room so people can join
+/advance #Shows advanced info about the room
+/announce <msg> #Puts your message in huge font and highlighted 
+/op <user> #Gives a user access to host commands
+/unop <user> #Revokes host commands from a user
+
+--Configs--
+/config name <new_name> #Re-names the room
+/config password <new_pw | none> #Changes the room password
+/config domain <domain | none> #Changes the domains allowed in room
+/config verify <on | off> #Changes the requirment of being verified in the room
+
+
+## Non Host Commands ##
+/quit #Leaves the room and puts you on the main screen
+/who #Shows you who is in the room
+/realname #Shows you the email address of each person and if they dont have one they are not verified
+/msg <user> <msg> #Messages a user in the same room as you without anyone else able to see it
+/server <msg> #Messages the host of the server
+/share #Allows you to share a file to others in that room and let them download it through your device
+/files #Shows you what files can be downloaded on the room
+/download <id> #Downloads the file from the senders computer
+/clear #Clears the current chat putting it back to how it would look when you join
+/ui <1 or 2> #Lets you change the look of your messages in the room with 1 currently being the newest look and 2 being a more simple look
+
 
