@@ -21,6 +21,7 @@ from email.message import EmailMessage
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 
+VERSION = "V1.2.0"
 DISCOVERY_PORT = 54545
 PORT_POOL_START = 5000
 PORT_POOL_MAX_INITIAL = 5500
@@ -92,6 +93,7 @@ def discover_rooms(timeout=1.5):
             "host": addr[0],
             "port": port,
             "room": room,
+            "version": info.get("version", "Unknown"),
             "has_password": bool(info.get("has_password", False)),
             "is_verified": bool(info.get("is_verified", False)),
             "domain_restriction": info.get("domain_restriction", "")
@@ -139,7 +141,7 @@ class RoomServer:
         self.shared_files = {}     # file_id (int) -> {"owner_sock": sock, "owner_name": str, "owner_ip": str, "file_port": int, "filename": str, "filesize": int}
         self.next_file_id = 1
         
-        self.lock = threading.RLock() # Re-entrant lock prevents deadlocks
+        self.lock = threading.RLock()
         self.running = False
 
     def start(self):
@@ -197,6 +199,7 @@ class RoomServer:
                 reply = json.dumps({
                     "room": self.room_name,
                     "port": self.port,
+                    "version": VERSION,
                     "has_password": bool(self.password),
                     "is_verified": self.is_verified,
                     "domain_restriction": self.domain_restriction
@@ -263,12 +266,21 @@ class RoomServer:
         user_email = "Guest (Unverified)"
         was_member = False
         try:
+            # 1. Room Name Verification
             sock.sendall(b"ROOM_NAME:")
             submitted_room = sock.recv(1024).decode("utf-8").strip()
             if submitted_room != self.room_name:
                 sock.sendall(b"REJECT:Wrong room name\n")
                 return
 
+            # 2. Strict Version Handshake Verification
+            sock.sendall(b"ROOM_VERSION:")
+            submitted_version = sock.recv(1024).decode("utf-8").strip()
+            if submitted_version != VERSION:
+                sock.sendall(f"REJECT:Version mismatch! Host is running {VERSION}, but you are running {submitted_version}.\n".encode("utf-8"))
+                return
+
+            # 3. Room Password Verification
             sock.sendall(b"ROOM_PASSWORD:")
             submitted_pw = sock.recv(1024).decode("utf-8").strip()
             if submitted_pw != self.password:
@@ -677,6 +689,7 @@ class RoomServer:
                         stats = (
                             f"[Advanced Server Statistics]\n"
                             f"  Room Name       : {self.room_name}\n"
+                            f"  Script Version  : {VERSION}\n"
                             f"  LAN Address     : {get_lan_ip()}:{self.port}\n"
                             f"  Room Lock Status: {'LOCKED' if self.is_locked else 'UNLOCKED'}\n"
                             f"  Online Clients  : {len(self.clients)} ({op_count} Operators)\n"
@@ -813,7 +826,7 @@ class ChatApp:
         self.root.geometry("580x690")
         self.root.minsize(480, 540)
 
-        self.ui_mode = 1  # 1 = New Look (Default with colors), 2 = Old Look (Classic)
+        self.ui_mode = 1  # 1 = New Look (Default with colors), 2 = Old Look (Classic), 3 = Matrix
         self.sock = None
         self.connected = False
         self.is_host = False
@@ -847,7 +860,7 @@ class ChatApp:
         footer_frame = ttk.Frame(self.root, padding=(10, 2))
         footer_frame.pack(side="bottom", fill="x")
 
-        self.version_lbl = ttk.Label(footer_frame, text="LAN-Link V1.2.0", font=("", 9, "bold"), foreground="gray")
+        self.version_lbl = ttk.Label(footer_frame, text=f"LAN-Link {VERSION}", font=("", 9, "bold"), foreground="gray")
         self.version_lbl.pack(side="left")
 
         self.debug_btn = ttk.Button(footer_frame, text="🐞 Toggle Debug Console", command=self._toggle_debug)
@@ -1257,7 +1270,6 @@ class ChatApp:
             self.chat_box.insert("end", line)
 
         elif self.ui_mode == 2:
-            # Mode 2: Classic / Old Look (Strips formatting control prefixes)
             if line.startswith("SYS_JOIN:"):
                 line = line[9:]
             elif line.startswith("SYS_LEAVE:"):
@@ -1285,7 +1297,6 @@ class ChatApp:
                 self.chat_box.insert("end", line)
 
         else:
-            # Mode 1: New Look (Default with Custom Color Coding)
             if line.startswith("SYS_JOIN:"):
                 clean_txt = line[9:]
                 self.chat_box.insert("end", clean_txt, "join_green")
@@ -1307,13 +1318,11 @@ class ChatApp:
                         ts_str, user_str, msg_str = m.groups()
                         self.chat_box.insert("end", ts_str)
                         
-                        # Server Op names rendered in Purple
                         if is_op:
                             self.chat_box.insert("end", user_str, "op_purple")
                         else:
                             self.chat_box.insert("end", user_str)
                             
-                        # Verified members messages rendered in Gold
                         if self.my_username and re.search(r'@' + re.escape(self.my_username) + r'\b', msg_str, re.IGNORECASE):
                             self.chat_box.insert("end", msg_str, "highlight")
                             try: self.root.bell()
@@ -1328,7 +1337,6 @@ class ChatApp:
                 else:
                     self.chat_box.insert("end", line)
             else:
-                # Fallback pattern matcher for local messages or plain text
                 if "joined the room" in line:
                     self.chat_box.insert("end", line, "join_green")
                 elif "left the room" in line:
@@ -1442,6 +1450,7 @@ class ChatApp:
         for room in chunk:
             self.displayed_rooms.append(room)
             tags = []
+            if room["version"] != VERSION: tags.append(f"⚠️ Version {room['version']}")
             if room["has_password"]: tags.append("🔒 Password")
             if room["is_verified"]: tags.append("✓ Verified")
             tag_str = f"  ({', '.join(tags)})" if tags else ""
@@ -1461,6 +1470,12 @@ class ChatApp:
             return
         
         self.selected_room = self.displayed_rooms[selection[0]]
+        
+        # Soft client-side warning if versions differ
+        if self.selected_room["version"] != VERSION:
+            if not messagebox.askyesno("Version Mismatch Warning", f"Warning: This room is running version {self.selected_room['version']}, but you are running {VERSION}.\n\nDo you still want to attempt joining?"):
+                return
+
         self.join_room_label_var.set(f"Joining: {self.selected_room['room']}")
         self.join_status_var.set("")
         self.pw_entry.delete(0, "end")
@@ -1558,6 +1573,7 @@ class ChatApp:
         try:
             sock = socket.create_connection((host, port), timeout=10)
 
+            # 1. Room Name Handshake
             sock.recv(1024)
             sock.sendall((room + "\n").encode("utf-8"))
 
@@ -1566,14 +1582,24 @@ class ChatApp:
                 sock.close()
                 self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
                 return
-            
-            sock.sendall((password + "\n").encode("utf-8"))
 
-            reply = sock.recv(1024).decode("utf-8")
-            if reply.startswith("REJECT:"):
-                sock.close()
-                self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
-                return
+            # 2. Strict Script Version Handshake
+            if "ROOM_VERSION:" in reply:
+                sock.sendall((VERSION + "\n").encode("utf-8"))
+                reply = sock.recv(1024).decode("utf-8")
+                if reply.startswith("REJECT:"):
+                    sock.close()
+                    self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
+                    return
+
+            # 3. Room Password Handshake
+            if "ROOM_PASSWORD:" in reply:
+                sock.sendall((password + "\n").encode("utf-8"))
+                reply = sock.recv(1024).decode("utf-8")
+                if reply.startswith("REJECT:"):
+                    sock.close()
+                    self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
+                    return
 
             if reply.startswith("NEED_EMAIL:"):
                 sock.sendall((user_email + "\n").encode("utf-8"))
@@ -1741,7 +1767,6 @@ class ChatApp:
         if not msg:
             return
 
-        # UI Mode Switcher Command
         cmd_parts = msg.strip().split()
         if len(cmd_parts) >= 2 and cmd_parts[0].upper() == "/UI":
             val = cmd_parts[1]
