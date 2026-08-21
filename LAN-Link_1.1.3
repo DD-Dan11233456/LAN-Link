@@ -133,9 +133,7 @@ class RoomServer:
         self.clients = {}          # socket -> {"username": str, "email": str, "ip": str, "is_host": bool, "is_op": bool, "is_muted": bool}
         self.host_socket = None
         self.is_locked = False
-        self.banned_emails = set()
-        self.banned_ips = set()
-        self.banned_usernames = set()
+        self.banned_records = []   # list of {"username": lower str, "ip": str, "email": lower str or ""}
 
         # File sharing registry
         self.shared_files = {}     # file_id (int) -> {"owner_sock": sock, "owner_name": str, "owner_ip": str, "file_port": int, "filename": str, "filesize": int}
@@ -256,7 +254,7 @@ class RoomServer:
             sock.close()
             return
 
-        if client_ip in self.banned_ips:
+        if any(rec["ip"] == client_ip for rec in self.banned_records):
             sock.sendall(b"REJECT:You are banned from this room.\n")
             sock.close()
             return
@@ -285,7 +283,7 @@ class RoomServer:
                     sock.sendall(b"REJECT:This server requires a verified email address.\n")
                     return
                 
-                if user_email in self.banned_emails:
+                if any(rec["email"] and rec["email"] == user_email for rec in self.banned_records):
                     sock.sendall(b"REJECT:Your email is banned from this room.\n")
                     return
                 
@@ -317,7 +315,7 @@ class RoomServer:
             if not username:
                 username = f"user_{addr[1]}"
 
-            if username.lower() in self.banned_usernames:
+            if any(rec["username"] == username.lower() for rec in self.banned_records):
                 sock.sendall(b"REJECT:Your username is banned from this room.\n")
                 sock.close()
                 return
@@ -685,7 +683,7 @@ class RoomServer:
                             f"  Shared Files    : {len(self.shared_files)}\n"
                             f"  Verified (2FA)  : {self.is_verified}\n"
                             f"  Domain Restr.   : {self.domain_restriction if self.domain_restriction else 'None'}\n"
-                            f"  Banned Summary  : {len(self.banned_usernames)} Users, {len(self.banned_ips)} IPs, {len(self.banned_emails)} Emails\n"
+                            f"  Banned Summary  : {len(self.banned_records)} entrie(s) (username+IP+email linked)\n"
                         )
                     sock.sendall(stats.encode("utf-8"))
                     continue
@@ -736,10 +734,11 @@ class RoomServer:
                             if info["username"].lower() == target_query or info["email"].lower() == target_query or info["username"].lower().startswith(target_query):
                                 target_sock = s
                                 target_name = info["username"]
-                                self.banned_usernames.add(info["username"].lower())
-                                self.banned_ips.add(info["ip"])
-                                if info["email"]:
-                                    self.banned_emails.add(info["email"].lower())
+                                self.banned_records.append({
+                                    "username": info["username"].lower(),
+                                    "ip": info["ip"],
+                                    "email": info["email"].lower() if info["email"] else ""
+                                })
                                 break
 
                     if target_sock and target_sock != sock:
@@ -763,20 +762,28 @@ class RoomServer:
                         sock.sendall(b"Usage: /unban <username, email, or IP>\n")
                         continue
 
-                    removed_any = False
+                    matched_record = None
                     with self.lock:
-                        if target_query in self.banned_usernames:
-                            self.banned_usernames.discard(target_query)
-                            removed_any = True
-                        if target_query in self.banned_emails:
-                            self.banned_emails.discard(target_query)
-                            removed_any = True
-                        if target_query in self.banned_ips:
-                            self.banned_ips.discard(target_query)
-                            removed_any = True
+                        for rec in self.banned_records:
+                            if rec["username"] == target_query or rec["username"].startswith(target_query):
+                                matched_record = rec
+                                break
+                        if matched_record is None:
+                            for rec in self.banned_records:
+                                if rec["email"] and (rec["email"] == target_query or rec["email"].startswith(target_query)):
+                                    matched_record = rec
+                                    break
+                        if matched_record is None:
+                            for rec in self.banned_records:
+                                if rec["ip"] == target_query:
+                                    matched_record = rec
+                                    break
+                        if matched_record:
+                            self.banned_records.remove(matched_record)
 
-                    if removed_any:
-                        self._broadcast(f"SYS_ALERT:** {target_query} was unbanned by {username} **\n")
+                    if matched_record:
+                        label = matched_record["username"] if matched_record["username"] else target_query
+                        self._broadcast(f"SYS_ALERT:** {label} was unbanned by {username} **\n")
                     else:
                         sock.sendall(f"'{target_query}' was not found in the ban list (usernames, emails, and IPs are all checked).\n".encode("utf-8"))
                     continue
