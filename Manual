@@ -30,12 +30,16 @@
 /unban <user> #Unbans a user
 /mute <user> #Stops a user from messaging
 /unmute <user> #Unmutes a user
+/muteall #Mutes everyone in the room
+/unmuteall #Unmutes all people in room
+/mutelist #List all muted users in the room
 /lock #Locks the room from anyone else joining
 /unlock #Unlocks the room so people can join
 /advance #Shows advanced info about the room
 /announce <msg> #Puts your message in huge font and highlighted 
 /op <user> #Gives a user access to host commands
 /unop <user> #Revokes host commands from a user
+
 
 --Configs--
 /config name <new_name> #Re-names the room
