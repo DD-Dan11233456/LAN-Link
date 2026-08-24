@@ -46,6 +46,7 @@
 /config password <new_pw | none> #Changes the room password
 /config domain <domain | none> #Changes the domains allowed in room
 /config verify <on | off> #Changes the requirment of being verified in the room
+/config join_muted <on | off> #If on when someone joins tehy wull be auto muted and if off then they can type
 
 
 ## Non Host Commands ##
