@@ -1420,7 +1420,7 @@ class ChatApp:
                     self.chat_box.insert("end", line, "join_green")
                 elif "left the room" in line:
                     self.chat_box.insert("end", line, "leave_red")
-                elif "kicked" in line.lower() or "banned" in line.lower() or "muted" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:"):
+                elif ("kicked" in line.lower() or "banned" in line.lower() or "muted" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]") and not "/config join_muted" in line:
                     self.chat_box.insert("end", line, "alert_orange")
                 elif line.startswith("[ANNOUNCEMENT]"):
                     self.chat_box.insert("end", line, "announcement")
