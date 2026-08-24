@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LAN-Link V1.2.0 - Direct P2P File Share & Private Messaging Edition
+LAN-Link V1.2.1 - Direct P2P File Share & Private Messaging Edition
 
 Run with: python3 chat_app.py
 Requires tkinter (Linux: sudo apt install python3-tk)
@@ -21,7 +21,7 @@ from email.message import EmailMessage
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 
-VERSION = "V1.2.0"
+VERSION = "V1.2.1"
 DISCOVERY_PORT = 54545
 PORT_POOL_START = 5000
 PORT_POOL_MAX_INITIAL = 5500
@@ -865,7 +865,7 @@ class RoomServer:
 class ChatApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("LAN-Link V1.2.0")
+        self.root.title("LAN-Link V1.2.1")
         self.root.geometry("580x690")
         self.root.minsize(480, 540)
 
@@ -1912,7 +1912,7 @@ if __name__ == "__main__":
     main()
 
 # ==========================================
-# LAN-Link V1.2.0
+# LAN-Link V1.2.1
 # License: Daniel Cave Personal-Use License (DPUL-1.0)
 # Copyright (c) 2026 Daniel Cave
 # Personal, private, non-commercial use only.
