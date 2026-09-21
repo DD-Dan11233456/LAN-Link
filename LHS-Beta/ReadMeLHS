@@ -1,1 +1,88 @@
+# LAN-Link V1.0.0.LHS
 
+Chat and share files with anyone on the LHS WiFi. No internet or server needed.
+
+*Made by Daniel Cave · DPUL-1.0*
+
+## Setup
+
+1. Connect to **LHS WiFi** first.
+2. Install tkinter if needed (Linux: `sudo apt install python3-tk`).
+3. Run:
+
+```
+python3 LAN-Link.py
+```
+
+Everyone must run the **same version** (`V1.0.0.LHS`) or joining is refused.
+
+## Host a room
+
+**Host a Room** → room name, optional password, your username → **Start Hosting**.
+Your IP shows at the top of the chat (e.g. `10.56.54.178:5000`).
+
+## Join a room
+
+**Join a Room** → double-click a room → username (+ password if asked) → **Join Room**.
+
+- **Refresh Search**: search again
+- **Filter by name**: narrow the list
+- **Can't see the room?** Type the host's IP in the **Host's IP** box → **Find**
+
+## Commands (everyone)
+
+| Command | Does |
+|---|---|
+| `/who` | List who's online |
+| `/msg <user> <text>` | Private message |
+| `/server <text>` | Private message to the host |
+| `/share` | Share a file |
+| `/files` | List shared files |
+| `/download <id>` | Download a file |
+| `/realname` | Show everyone's email |
+| `/clear` | Clear your chat |
+| `/ui 1` `/ui 2` `/ui 3` | New / Classic / Matrix look |
+| `/quit` | Leave |
+
+Names can be shortened: `/msg da hi` reaches `dan`.
+
+## Commands (host and operators)
+
+| Command | Does |
+|---|---|
+| `/kick <user>` | Remove someone |
+| `/ban <user or email>` | Ban username, IP and email |
+| `/unban <user, email or IP>` | Unban |
+| `/banlist` | Show bans |
+| `/mute <user>` / `/unmute <user>` | Mute / unmute one person |
+| `/muteall` / `/unmuteall` | Mute / unmute everyone |
+| `/mutelist` | Show muted people |
+| `/lock` / `/unlock` | Block / allow new joiners |
+| `/announce <text>` | Room-wide announcement |
+| `/op <user>` / `/unop <user>` | Give / remove operator |
+| `/password` | Show room password |
+| `/advance` | Room stats |
+
+## /config (host and operators)
+
+| Command | Does |
+|---|---|
+| `/config name <new name>` | Rename room |
+| `/config password <pw>` or `none` | Set / remove password |
+| `/config domain <@domain>` or `none` | Email domain limit (include the `@`) |
+| `/config verify on` / `off` | Email 2FA for joiners |
+| `/config join_muted on` / `off` | New joiners start muted |
+
+## Files
+
+`/share` → pick file. Others type `/download <id>` → choose where to save.
+The sharer must stay in the room.
+
+## Not working?
+
+1. Press **Refresh Search** a couple of times.
+2. Use the **Host's IP** box.
+3. Check you're both on the same version.
+4. Host firewall: allow **UDP 54545** and **TCP 5000-5500**
+   (`sudo ufw allow 54545/udp` and `sudo ufw allow 5000:5500/tcp`).
+5. Still nothing? The WiFi may block devices talking to each other. Ask school IT.
