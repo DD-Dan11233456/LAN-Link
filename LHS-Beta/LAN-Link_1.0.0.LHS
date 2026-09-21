@@ -32,6 +32,7 @@ _dynamic_port_ceiling = PORT_POOL_MAX_INITIAL
 
 # LHS WiFi network (10.56.x.x, gateway 10.56.48.1)
 LHS_GATEWAY = "10.56.48.1"
+LHS_GREEN = "#2E9E4F"  # colour of the "-LHS" in the home screen title (change to match the school logo)
 
 
 def get_lan_ip():
@@ -1131,6 +1132,8 @@ class ChatApp:
         lbl_dash.pack(side="left")
         lbl_link = tk.Label(title_frame, text="Link", font=("", 20, "bold"), fg="#306998", bg=self.root.cget("bg"))
         lbl_link.pack(side="left")
+        lbl_lhs = tk.Label(title_frame, text="-LHS", font=("", 20, "bold"), fg=LHS_GREEN, bg=self.root.cget("bg"))
+        lbl_lhs.pack(side="left")
 
         ttk.Label(self.home_frame, text="made by Daniel Cave", font=("", 9, "italic"), foreground="gray").pack(pady=(0, 2))
         ttk.Label(self.home_frame, text="Code licensed under the Daniel Cave Personal-Use License (DPUL-1.0)", font=("", 8), foreground="#555555").pack(pady=(0, 8))
