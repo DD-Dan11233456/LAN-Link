@@ -6,7 +6,7 @@ Chat and share files with anyone on the LHS WiFi. No internet or server needed.
 
 ## Setup
 
-1. Connect to **LHS WiFi** first.
+1. Connect to WiFi first.
 2. Install tkinter if needed (Linux: `sudo apt install python3-tk`).
 3. Run:
 
@@ -83,6 +83,4 @@ The sharer must stay in the room.
 1. Press **Refresh Search** a couple of times.
 2. Use the **Host's IP** box.
 3. Check you're both on the same version.
-4. Host firewall: allow **UDP 54545** and **TCP 5000-5500**
-   (`sudo ufw allow 54545/udp` and `sudo ufw allow 5000:5500/tcp`).
-5. Still nothing? The WiFi may block devices talking to each other. Ask school IT.
+4. Still nothing? The WiFi may block devices talking to each other. Ask school IT.
