@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 LAN-Link V1.0.0.LHS - Direct P2P File Share & Private Messaging Edition
@@ -237,13 +236,14 @@ class RoomServer:
         self.socket = None
         self.discovery_socket = None
         self.port = None
-        self.clients = {}
+        self.clients = {}          # socket -> {"username": str, "email": str, "ip": str, "is_host": bool, "is_op": bool, "is_muted": bool}
         self.host_socket = None
         self.is_locked = False
-        self.join_muted = False
-        self.banned_records = []
+        self.join_muted = False    # Auto-mute newly joined users
+        self.banned_records = []   # list of {"username": lower str, "ip": str, "email": lower str or ""}
 
-        self.shared_files = {}
+        # File sharing registry
+        self.shared_files = {}     # file_id (int) -> {"owner_sock": sock, "owner_name": str, "owner_ip": str, "file_port": int, "filename": str, "filesize": int}
         self.next_file_id = 1
         
         self.lock = threading.RLock()
@@ -372,18 +372,21 @@ class RoomServer:
         user_email = "Guest (Unverified)"
         was_member = False
         try:
+            # 1. Room Name Verification
             sock.sendall(b"ROOM_NAME:")
             submitted_room = sock.recv(1024).decode("utf-8").strip()
             if submitted_room != self.room_name:
                 sock.sendall(b"REJECT:Wrong room name\n")
                 return
 
+            # 2. Strict Version Handshake Verification
             sock.sendall(b"ROOM_VERSION:")
             submitted_version = sock.recv(1024).decode("utf-8").strip()
             if submitted_version != VERSION:
                 sock.sendall(f"REJECT:Version mismatch! Host is running {VERSION}, but you are running {submitted_version}.\n".encode("utf-8"))
                 return
 
+            # 3. Room Password Verification
             sock.sendall(b"ROOM_PASSWORD:")
             submitted_pw = sock.recv(1024).decode("utf-8").strip()
             if submitted_pw != self.password:
@@ -445,6 +448,7 @@ class RoomServer:
                 if username in existing_names:
                     username = f"{username}_{addr[1]}"
                 
+                # Apply join_muted rule to non-host/non-op joiners
                 should_mute = self.join_muted if not is_host_client else False
 
                 self.clients[sock] = {
@@ -1005,7 +1009,7 @@ class ChatApp:
         self.root.geometry("580x690")
         self.root.minsize(480, 540)
 
-        self.ui_mode = 1
+        self.ui_mode = 1  # 1 = New Look (Default with colors), 2 = Old Look (Classic), 3 = Matrix
         self.sock = None
         self.connected = False
         self.is_host = False
@@ -1016,6 +1020,7 @@ class ChatApp:
         self.user_email = ""
         self.is_user_verified = False
 
+        # Direct P2P File Server Listener Setup
         self.my_shared_files = {}
         self.pending_share_filepath = None
         
@@ -1125,7 +1130,9 @@ class ChatApp:
         lbl_dash.pack(side="left")
         lbl_link = tk.Label(title_frame, text="Link", font=("", 20, "bold"), fg="#306998", bg=self.root.cget("bg"))
         lbl_link.pack(side="left")
-        lbl_lhs = tk.Label(title_frame, text="-LHS", font=("", 20, "bold"), fg=LHS_GREEN, bg=self.root.cget("bg"))
+        lbl_dash2 = tk.Label(title_frame, text="-", font=("", 20, "bold"), fg="gray", bg=self.root.cget("bg"))
+        lbl_dash2.pack(side="left")
+        lbl_lhs = tk.Label(title_frame, text="LHS", font=("", 20, "bold"), fg=LHS_GREEN, bg=self.root.cget("bg"))
         lbl_lhs.pack(side="left")
 
         ttk.Label(self.home_frame, text="made by Daniel Cave", font=("", 9, "italic"), foreground="gray").pack(pady=(0, 2))
@@ -1367,10 +1374,12 @@ class ChatApp:
         self.chat_box_default_fg = self.chat_box.cget("foreground")
         self.chat_box_default_font = self.chat_box.cget("font")
 
+        # Style tags for formatting
         self.chat_box.tag_configure("highlight", background="#FFFF00", foreground="#000000", font=("", 9, "bold"))
         self.chat_box.tag_configure("announcement", background="#FF8C00", foreground="#FFFFFF", font=("", 10, "bold"))
         self.chat_box.tag_configure("private", foreground="#8A2BE2", font=("", 9, "bold"))
         
+        # UI Mode 1 Custom Color Tags
         self.chat_box.tag_configure("join_green", foreground="#28A745", font=("", 9, "bold"))
         self.chat_box.tag_configure("leave_red", foreground="#DC3545", font=("", 9, "bold"))
         self.chat_box.tag_configure("alert_orange", foreground="#FD7E14", font=("", 9, "bold"))
@@ -1686,6 +1695,7 @@ class ChatApp:
         
         self.selected_room = self.displayed_rooms[selection[0]]
         
+        # Soft client-side warning if versions differ
         if self.selected_room["version"] != VERSION:
             if not messagebox.askyesno("Version Mismatch Warning", f"Warning: This room is running version {self.selected_room['version']}, but you are running {VERSION}.\n\nDo you still want to attempt joining?"):
                 return
@@ -1787,6 +1797,7 @@ class ChatApp:
         try:
             sock = socket.create_connection((host, port), timeout=10)
 
+            # 1. Room Name Handshake
             sock.recv(1024)
             sock.sendall((room + "\n").encode("utf-8"))
 
@@ -1796,6 +1807,7 @@ class ChatApp:
                 self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
                 return
 
+            # 2. Strict Script Version Handshake
             if "ROOM_VERSION:" in reply:
                 sock.sendall((VERSION + "\n").encode("utf-8"))
                 reply = sock.recv(1024).decode("utf-8")
@@ -1804,6 +1816,7 @@ class ChatApp:
                     self.event_queue.put((is_host_error_target, reply.split(":", 1)[1].strip()))
                     return
 
+            # 3. Room Password Handshake
             if "ROOM_PASSWORD:" in reply:
                 sock.sendall((password + "\n").encode("utf-8"))
                 reply = sock.recv(1024).decode("utf-8")
@@ -2086,5 +2099,3 @@ if __name__ == "__main__":
 # Personal, private, non-commercial use only.
 # No redistribution, modifications, or public use allowed.
 # ==========================================
-
-```
