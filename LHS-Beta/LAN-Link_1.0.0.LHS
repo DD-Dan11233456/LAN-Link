@@ -19,8 +19,6 @@ import re
 import webbrowser
 import ipaddress
 import subprocess
-import html
-import urllib.parse
 from email.message import EmailMessage
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
@@ -154,7 +152,7 @@ def discover_rooms(timeout=2.5):
         port = info.get("port")
         if not room or not port:
             continue
-
+        
         key = (addr[0], port)
         results[key] = {
             "host": addr[0],
@@ -234,7 +232,7 @@ class RoomServer:
         self.domain_restriction = domain_restriction.strip().lower()
         self.smtp_sender = smtp_sender.strip()
         self.smtp_password = smtp_password.strip()
-
+        
         self.socket = None
         self.discovery_socket = None
         self.port = None
@@ -247,7 +245,7 @@ class RoomServer:
         # File sharing registry
         self.shared_files = {}     # file_id (int) -> {"owner_sock": sock, "owner_name": str, "owner_ip": str, "file_port": int, "filename": str, "filesize": int}
         self.next_file_id = 1
-
+        
         self.lock = threading.RLock()
         self.running = False
 
@@ -402,11 +400,11 @@ class RoomServer:
                 if not user_email or user_email.startswith("guest"):
                     sock.sendall(b"REJECT:This server requires a verified email address.\n")
                     return
-
+                
                 if any(rec["email"] and rec["email"] == user_email for rec in self.banned_records):
                     sock.sendall(b"REJECT:Your email is banned from this room.\n")
                     return
-
+                
                 if self.domain_restriction:
                     if "@" in self.domain_restriction and not user_email.endswith(self.domain_restriction) and user_email != self.domain_restriction:
                         sock.sendall(f"REJECT:Email must match restriction '{self.domain_restriction}'\n".encode("utf-8"))
@@ -449,7 +447,8 @@ class RoomServer:
                 existing_names = [c["username"] for c in self.clients.values()]
                 if username in existing_names:
                     username = f"{username}_{addr[1]}"
-
+                
+                # Apply join_muted rule to non-host/non-op joiners
                 should_mute = self.join_muted if not is_host_client else False
 
                 self.clients[sock] = {
@@ -463,10 +462,10 @@ class RoomServer:
                 was_member = True
 
             self._broadcast(f"SYS_JOIN:** {username} joined the room **\n", exclude=sock)
-
+            
             help_msg = (
                 f"Welcome to '{self.room_name}', {username}!\n"
-                "Commands: /quit, /who, /realname, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /ip, /clear, /ui 1|2|3"
+                "Commands: /quit, /who, /realname, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3"
             )
             if self._is_admin(sock):
                 help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop"
@@ -479,12 +478,12 @@ class RoomServer:
             for line in f_in:
                 if not self.running:
                     break
-
+                
                 text = line.strip()
                 if not text:
                     continue
 
-                if self.clients[sock]["is_muted"] and not text.startswith(("/quit", "/who", "/realname", "/files", "/download", "/clear", "/server", "/msg", "/ip")):
+                if self.clients[sock]["is_muted"] and not text.startswith(("/quit", "/who", "/realname", "/files", "/download", "/clear", "/server", "/msg")):
                     sock.sendall(b"Error: You are currently muted by an operator.\n")
                     continue
 
@@ -493,7 +492,7 @@ class RoomServer:
                         names = ", ".join([c["username"] for c in self.clients.values()])
                     cleared_help = (
                         f"Welcome to '{self.room_name}', {username}!\n"
-                        "Commands: /quit, /who, /realname, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /ip, /clear, /ui 1|2|3"
+                        "Commands: /quit, /who, /realname, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3"
                     )
                     if self._is_admin(sock):
                         cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop"
@@ -510,7 +509,7 @@ class RoomServer:
                         except ValueError:
                             filesize = 0
                             file_port = 0
-
+                        
                         owner_ip = client_ip
                         if owner_ip in ("127.0.0.1", "::1", "localhost"):
                             owner_ip = get_lan_ip()
@@ -554,7 +553,7 @@ class RoomServer:
                         except ValueError:
                             sock.sendall(b"Error: Invalid File ID.\n")
                             continue
-
+                        
                         owner_ip = None
                         file_port = None
                         filename = ""
@@ -567,13 +566,7 @@ class RoomServer:
                         if not owner_ip or not file_port:
                             sock.sendall(b"Error: File not found or owner is offline.\n")
                         else:
-                            file_url = f"http://{owner_ip}:{file_port}/file/{fid}"
-                            sock.sendall(f"FILE_URL:{file_url}|{filename}\n".encode("utf-8"))
-                    continue
-
-                if text.startswith("/ip"):
-                    room_address = f"{get_lan_ip()}:{self.port}"
-                    self._broadcast(f"SYS_ALERT:** Room join address: {room_address} **\n")
+                            sock.sendall(f"FILE_HOST_INFO:{fid}:{owner_ip}:{file_port}:{filename}\n".encode("utf-8"))
                     continue
 
                 if text.startswith("/quit"):
@@ -595,7 +588,7 @@ class RoomServer:
                     if len(parts) < 3:
                         sock.sendall(b"Usage: /msg <username> <message>\n")
                         continue
-
+                    
                     target_query = parts[1].strip().lower()
                     dm_msg = parts[2].strip()
                     if not dm_msg:
@@ -628,7 +621,7 @@ class RoomServer:
                     if not dm_msg:
                         sock.sendall(b"Usage: /server <message to host>\n")
                         continue
-
+                    
                     if not self.host_socket:
                         sock.sendall(b"Error: Host is not currently online in the room.\n")
                         continue
@@ -1023,14 +1016,14 @@ class ChatApp:
         self.my_username = ""
         self.room_server = None
         self.event_queue = queue.Queue()
-
+        
         self.user_email = ""
         self.is_user_verified = False
 
         # Direct P2P File Server Listener Setup
         self.my_shared_files = {}
         self.pending_share_filepath = None
-
+        
         self.file_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.file_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.file_server_socket.bind(("0.0.0.0", 0))
@@ -1077,14 +1070,11 @@ class ChatApp:
     def _handle_direct_upload(self, sock):
         try:
             sock.settimeout(5.0)
-            req = sock.recv(4096).decode("utf-8", errors="replace")
+            req = sock.recv(1024).decode("utf-8").strip()
             sock.settimeout(None)
 
-            if not req:
-                return
-
             if req.startswith("GET_FILE:"):
-                fid = int(req.split(":", 1)[1].strip())
+                fid = int(req.split(":", 1)[1])
                 filepath = self.my_shared_files.get(fid)
                 if filepath and os.path.exists(filepath):
                     with open(filepath, "rb") as f:
@@ -1093,53 +1083,6 @@ class ChatApp:
                             if not chunk:
                                 break
                             sock.sendall(chunk)
-                return
-
-            first_line = req.splitlines()[0].strip() if req.splitlines() else ""
-            if first_line.startswith("GET "):
-                method, path, _ = first_line.split(" ", 2)
-                if method != "GET":
-                    return
-                safe_path = urllib.parse.unquote(path)
-                if safe_path == "/":
-                    links = []
-                    for fid, filepath in self.my_shared_files.items():
-                        if os.path.exists(filepath):
-                            name = html.escape(os.path.basename(filepath))
-                            links.append(f'<li><a href="/file/{fid}">{name}</a></li>')
-                    body = (
-                        "<!DOCTYPE html><html><body><h1>LAN-Link shared files</h1>"
-                        f"<ul>{''.join(links)}</ul></body></html>"
-                    ).encode("utf-8")
-                    response = (
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: text/html; charset=utf-8\r\n"
-                        + f"Content-Length: {len(body)}\r\n".encode("utf-8")
-                        + b"Connection: close\r\n\r\n" + body
-                    )
-                    sock.sendall(response)
-                    return
-
-                match = re.fullmatch(r"/file/(\d+)", safe_path)
-                if not match:
-                    sock.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found")
-                    return
-                fid = int(match.group(1))
-                filepath = self.my_shared_files.get(fid)
-                if filepath and os.path.exists(filepath):
-                    data = open(filepath, "rb").read()
-                    filename = os.path.basename(filepath)
-                    safe_filename = urllib.parse.quote(filename)
-                    header = (
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/octet-stream\r\n"
-                        + f"Content-Length: {len(data)}\r\n".encode("utf-8")
-                        + f"Content-Disposition: attachment; filename*=UTF-8''{safe_filename}\r\n".encode("utf-8")
-                        + b"Connection: close\r\n\r\n"
-                    )
-                    sock.sendall(header + data)
-                else:
-                    sock.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found")
         except Exception as e:
             print(f"[P2P Server] Error uploading file: {e}")
         finally:
@@ -1157,18 +1100,15 @@ class ChatApp:
 
         self.debug_text = scrolledtext.ScrolledText(self.debug_window, state="disabled", wrap="word", font=("Consolas", 9))
         self.debug_text.pack(fill="both", expand=True, padx=5, pady=5)
-
+        
         class StdoutRedirector:
             def __init__(self, eq):
                 self.eq = eq
-
             def write(self, msg):
                 if msg:
                     self.eq.put(("debug", msg))
-
-            def flush(self):
-                pass
-
+            def flush(self): pass
+            
         sys.stdout = StdoutRedirector(self.event_queue)
         sys.stderr = sys.stdout
 
@@ -1180,10 +1120,10 @@ class ChatApp:
 
     def _build_home_frame(self):
         self.home_frame = ttk.Frame(self.root, padding=25)
-
+        
         title_frame = ttk.Frame(self.home_frame)
         title_frame.pack(pady=(10, 2))
-
+        
         lbl_lan = tk.Label(title_frame, text="LAN", font=("", 20, "bold"), fg="#FFD43B", bg=self.root.cget("bg"))
         lbl_lan.pack(side="left")
         lbl_dash = tk.Label(title_frame, text="-", font=("", 20, "bold"), fg="gray", bg=self.root.cget("bg"))
@@ -1213,7 +1153,7 @@ class ChatApp:
 
         self.verify_email_btn = ttk.Button(btn_box, text="Verify Email via 2FA", command=self._prompt_verify_email)
         self.verify_email_btn.pack(side="left")
-
+        
         self.guest_toggle_btn = ttk.Button(btn_box, text="Switch to Guest Mode", command=self._switch_to_guest)
         self.guest_toggle_btn.pack(side="left", padx=(6, 0))
 
@@ -1247,7 +1187,7 @@ class ChatApp:
             return
 
         user_entered_code = simpledialog.askstring("Enter 2FA Code", f"Enter the 6-digit verification code sent to {recipient_email}:", parent=self.root)
-
+        
         if user_entered_code and user_entered_code.strip() == generated_code:
             self.user_email = recipient_email
             self.is_user_verified = True
@@ -1354,9 +1294,9 @@ class ChatApp:
 
         list_container = ttk.Frame(self.search_frame)
         list_container.pack(fill="both", expand=True)
-
+        
         self.load_more_btn = ttk.Button(list_container, text="Load 25 More", command=self._load_more_rooms)
-
+        
         list_box_frame = ttk.Frame(list_container)
         list_box_frame.pack(fill="both", expand=True, side="top", pady=(0, 4))
         self.rooms_listbox = tk.Listbox(list_box_frame, activestyle="dotbox")
@@ -1368,9 +1308,9 @@ class ChatApp:
 
         ip_frame = ttk.Frame(self.search_frame)
         ip_frame.pack(fill="x", pady=(8, 0))
-        ttk.Label(ip_frame, text="Host IP or IP:PORT:").pack(side="left")
+        ttk.Label(ip_frame, text="Can't see a room? Host's IP:").pack(side="left")
         self.direct_ip_var = tk.StringVar()
-        direct_entry = ttk.Entry(ip_frame, textvariable=self.direct_ip_var, width=20)
+        direct_entry = ttk.Entry(ip_frame, textvariable=self.direct_ip_var, width=16)
         direct_entry.pack(side="left", padx=(6, 0))
         direct_entry.bind("<Return>", lambda e: self.find_room_by_ip())
         ttk.Button(ip_frame, text="Find", command=self.find_room_by_ip).pack(side="left", padx=(6, 0))
@@ -1438,7 +1378,7 @@ class ChatApp:
         self.chat_box.tag_configure("highlight", background="#FFFF00", foreground="#000000", font=("", 9, "bold"))
         self.chat_box.tag_configure("announcement", background="#FF8C00", foreground="#FFFFFF", font=("", 10, "bold"))
         self.chat_box.tag_configure("private", foreground="#8A2BE2", font=("", 9, "bold"))
-
+        
         # UI Mode 1 Custom Color Tags
         self.chat_box.tag_configure("join_green", foreground="#28A745", font=("", 9, "bold"))
         self.chat_box.tag_configure("leave_red", foreground="#DC3545", font=("", 9, "bold"))
@@ -1526,10 +1466,8 @@ class ChatApp:
 
             if (line.startswith("[ANNOUNCEMENT]") or "[PRIVATE" in line or line.startswith("[PRIVATE")
                     or (self.my_username and re.search(r'@' + re.escape(self.my_username) + r'\b', line, re.IGNORECASE))):
-                try:
-                    self.root.bell()
-                except Exception:
-                    pass
+                try: self.root.bell()
+                except Exception: pass
 
             self.chat_box.insert("end", line)
 
@@ -1547,22 +1485,16 @@ class ChatApp:
 
             if line.startswith("[ANNOUNCEMENT]"):
                 self.chat_box.insert("end", line, "announcement")
-                try:
-                    self.root.bell()
-                except Exception:
-                    pass
+                try: self.root.bell()
+                except Exception: pass
             elif "[PRIVATE" in line or line.startswith("[PRIVATE"):
                 self.chat_box.insert("end", line, "private")
-                try:
-                    self.root.bell()
-                except Exception:
-                    pass
+                try: self.root.bell()
+                except Exception: pass
             elif self.my_username and re.search(r'@' + re.escape(self.my_username) + r'\b', line, re.IGNORECASE):
                 self.chat_box.insert("end", line, "highlight")
-                try:
-                    self.root.bell()
-                except Exception:
-                    pass
+                try: self.root.bell()
+                except Exception: pass
             else:
                 self.chat_box.insert("end", line)
 
@@ -1582,23 +1514,21 @@ class ChatApp:
                     is_op = (parts[1] == "1")
                     is_ver = (parts[2] == "1")
                     payload = parts[3]
-
+                    
                     m = re.match(r"^(\[\d{2}:\d{2}:\d{2}\]\s+)([^:]+)(:\s+.*)$", payload)
                     if m:
                         ts_str, user_str, msg_str = m.groups()
                         self.chat_box.insert("end", ts_str)
-
+                        
                         if is_op:
                             self.chat_box.insert("end", user_str, "op_purple")
                         else:
                             self.chat_box.insert("end", user_str)
-
+                            
                         if self.my_username and re.search(r'@' + re.escape(self.my_username) + r'\b', msg_str, re.IGNORECASE):
                             self.chat_box.insert("end", msg_str, "highlight")
-                            try:
-                                self.root.bell()
-                            except Exception:
-                                pass
+                            try: self.root.bell()
+                            except Exception: pass
                         elif is_ver:
                             self.chat_box.insert("end", msg_str, "verified_gold")
                         else:
@@ -1613,26 +1543,20 @@ class ChatApp:
                     self.chat_box.insert("end", line, "join_green")
                 elif "left the room" in line:
                     self.chat_box.insert("end", line, "leave_red")
-                elif ("kicked" in line.lower() or "banned" in line.lower() or "muted" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]"):
+                elif ("kicked" in line.lower() or "banned" in line.lower() or "muted" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]") and not "/config join_muted" in line and not line.startswith("  ") and not line.startswith("[Advanced Server Statistics]"):
                     self.chat_box.insert("end", line, "alert_orange")
                 elif line.startswith("[ANNOUNCEMENT]"):
                     self.chat_box.insert("end", line, "announcement")
-                    try:
-                        self.root.bell()
-                    except Exception:
-                        pass
+                    try: self.root.bell()
+                    except Exception: pass
                 elif "[PRIVATE" in line or line.startswith("[PRIVATE"):
                     self.chat_box.insert("end", line, "private")
-                    try:
-                        self.root.bell()
-                    except Exception:
-                        pass
+                    try: self.root.bell()
+                    except Exception: pass
                 elif self.my_username and re.search(r'@' + re.escape(self.my_username) + r'\b', line, re.IGNORECASE):
                     self.chat_box.insert("end", line, "highlight")
-                    try:
-                        self.root.bell()
-                    except Exception:
-                        pass
+                    try: self.root.bell()
+                    except Exception: pass
                 else:
                     self.chat_box.insert("end", line)
 
@@ -1700,34 +1624,11 @@ class ChatApp:
         self.event_queue.put(("rooms_found", rooms))
 
     def find_room_by_ip(self):
-        raw = self.direct_ip_var.get().strip()
-        if not raw:
+        ip = self.direct_ip_var.get().strip()
+        if not ip:
             return
-        port = None
-        host = raw
-        if ":" in raw and raw.count(":") == 1:
-            try:
-                host, port_text = raw.rsplit(":", 1)
-                port = int(port_text)
-                if port < 1 or port > 65535:
-                    port = None
-            except ValueError:
-                port = None
-        if port is not None:
-            self.search_status_var.set(f"Checking {host}:{port}...")
-            self.event_queue.put(("rooms_found", [{
-                "host": host,
-                "port": port,
-                "room": f"Direct room at {host}:{port}",
-                "version": VERSION,
-                "has_password": False,
-                "is_verified": False,
-                "join_muted": False,
-                "domain_restriction": "",
-            }]))
-            return
-        self.search_status_var.set(f"Contacting {host}...")
-        threading.Thread(target=self._find_room_by_ip_bg, args=(host,), daemon=True).start()
+        self.search_status_var.set(f"Contacting {ip}...")
+        threading.Thread(target=self._find_room_by_ip_bg, args=(ip,), daemon=True).start()
 
     def _find_room_by_ip_bg(self, ip):
         result = discover_direct(ip)
@@ -1752,7 +1653,7 @@ class ChatApp:
             self.filtered_rooms = [r for r in self.all_discovered_rooms if query in r["room"].lower()]
         else:
             self.filtered_rooms = self.all_discovered_rooms.copy()
-
+            
         self.rooms_loaded_count = 0
         self.displayed_rooms = []
         self.rooms_listbox.delete(0, "end")
@@ -1768,23 +1669,19 @@ class ChatApp:
         start = self.rooms_loaded_count
         end = start + 25
         chunk = self.filtered_rooms[start:end]
-
+        
         for room in chunk:
             self.displayed_rooms.append(room)
             tags = []
-            if room["version"] != VERSION:
-                tags.append(f"⚠️ Version {room['version']}")
-            if room["has_password"]:
-                tags.append("🔒 Password")
-            if room["is_verified"]:
-                tags.append("✓ Verified")
-            if room.get("join_muted"):
-                tags.append("🔇 Auto-Mute [M]")
+            if room["version"] != VERSION: tags.append(f"⚠️ Version {room['version']}")
+            if room["has_password"]: tags.append("🔒 Password")
+            if room["is_verified"]: tags.append("✓ Verified")
+            if room.get("join_muted"): tags.append("🔇 Auto-Mute [M]")
             tag_str = f"  ({', '.join(tags)})" if tags else ""
             self.rooms_listbox.insert("end", room["room"] + tag_str)
-
+            
         self.rooms_loaded_count += len(chunk)
-
+        
         if self.rooms_loaded_count < len(self.filtered_rooms):
             self.load_more_btn.pack(side="bottom", fill="x")
         else:
@@ -1795,11 +1692,12 @@ class ChatApp:
         if not selection:
             messagebox.showinfo("Pick a room", "Select a room from the list first.")
             return
-
+        
         self.selected_room = self.displayed_rooms[selection[0]]
-
+        
+        # Soft client-side warning if versions differ
         if self.selected_room["version"] != VERSION:
-            if not messagebox.askyesno("Version Mismatch Warning", f"Warning: This room is running version {self.selected_room['version']}, but you are running {VERSION}.\n\nDo you still want to attempt to join?", parent=self.root):
+            if not messagebox.askyesno("Version Mismatch Warning", f"Warning: This room is running version {self.selected_room['version']}, but you are running {VERSION}.\n\nDo you still want to attempt joining?"):
                 return
 
         self.join_room_label_var.set(f"Joining: {self.selected_room['room']}")
@@ -1865,7 +1763,7 @@ class ChatApp:
 
         self.room_server = server
         self.is_host = True
-
+        
         host_email = self.user_email if self.is_user_verified else "Server-Host"
         self._connect_and_login("127.0.0.1", port, room, password, username, user_email=host_email, is_host_error_target="host_error")
 
@@ -1876,7 +1774,7 @@ class ChatApp:
         if not username:
             self.join_status_var.set("Username is required.")
             return
-
+        
         user_email = self.join_email_entry.get().strip()
         if self.selected_room["is_verified"] and not user_email:
             self.join_status_var.set("Email is required for Verified Servers.")
@@ -1929,7 +1827,7 @@ class ChatApp:
 
             if reply.startswith("NEED_EMAIL:"):
                 sock.sendall((user_email + "\n").encode("utf-8"))
-
+                
                 reply = sock.recv(1024).decode("utf-8")
                 if reply.startswith("REJECT:"):
                     sock.close()
@@ -1938,7 +1836,6 @@ class ChatApp:
 
                 if reply.startswith("NEED_CODE:"):
                     code_val = []
-
                     def ask_code():
                         c = simpledialog.askstring("2FA Verification", f"Enter the 6-digit code sent to {user_email}:", parent=self.root)
                         code_val.append(c or "")
@@ -1955,7 +1852,7 @@ class ChatApp:
                         return
             else:
                 sock.sendall((user_email + "\n").encode("utf-8"))
-
+            
             sock.sendall((username + "\n").encode("utf-8"))
             welcome = sock.recv(1024).decode("utf-8")
             sock.settimeout(None)
@@ -1976,7 +1873,7 @@ class ChatApp:
             for line in f_in:
                 if not self.connected:
                     break
-
+                
                 text = line.strip()
                 if not text:
                     continue
@@ -2006,13 +1903,6 @@ class ChatApp:
                             _, ext = os.path.splitext(filename)
                             ext_label = ext if ext else "no ext"
                             self.event_queue.put(("chat", f"SYS_ALERT:** You shared '{filename}' successfully (ID {fid} [{ext_label}]) **"))
-                    continue
-
-                if text.startswith("FILE_URL:"):
-                    payload = text[len("FILE_URL:"):]
-                    url, sep, filename = payload.partition("|")
-                    if url and sep:
-                        self.event_queue.put(("chat", f"SYS_ALERT:** Download link for '{filename}': {url} **"))
                     continue
 
                 if text.startswith("FILE_HOST_INFO:"):
@@ -2061,7 +1951,7 @@ class ChatApp:
                     s.settimeout(None)
 
                     s.sendall(f"GET_FILE:{fid}\n".encode("utf-8"))
-
+                    
                     file_bytes = bytearray()
                     while True:
                         chunk = s.recv(65536)
@@ -2081,7 +1971,6 @@ class ChatApp:
                                 self.event_queue.put(("chat", f"SYS_ALERT:** File '{filename}' successfully downloaded directly from peer and saved to {save_path} **"))
                             except Exception as e:
                                 messagebox.showerror("Error", f"Failed to save file: {e}")
-
                     self.root.after(0, save_and_close)
 
                 except Exception as e:
@@ -2089,7 +1978,6 @@ class ChatApp:
                         progress.stop()
                         win.destroy()
                         messagebox.showerror("Download Error", f"Direct P2P download failed: {e}", parent=self.root)
-
                     self.root.after(0, error_and_close)
 
             threading.Thread(target=peer_download_task, daemon=True).start()
