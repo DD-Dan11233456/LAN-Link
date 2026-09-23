@@ -1,3 +1,14 @@
+The `/ip` command has been added to the script. Any connected user (whether regular client or operator, and even if muted) can run `/ip` in the chat to see the server's IP address and port.
+
+### Changes Made
+
+1. **Added `/ip` Command Handling:** When a user types `/ip`, the server responds with `[Server Info] Server IP: <IP>:<Port>`.
+2. **Updated Mute Exemption:** `/ip` remains accessible even if a user is muted by an operator.
+3. **Updated Help Strings:** Included `/ip` in the welcome message and clear chat command list.
+
+Here is the updated Python code:
+
+```python
 #!/usr/bin/env python3
 """
 LAN-Link V1.0.0.LHS - Direct P2P File Share & Private Messaging Edition
@@ -465,7 +476,7 @@ class RoomServer:
             
             help_msg = (
                 f"Welcome to '{self.room_name}', {username}!\n"
-                "Commands: /quit, /who, /realname, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3"
+                "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3"
             )
             if self._is_admin(sock):
                 help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop"
@@ -483,7 +494,7 @@ class RoomServer:
                 if not text:
                     continue
 
-                if self.clients[sock]["is_muted"] and not text.startswith(("/quit", "/who", "/realname", "/files", "/download", "/clear", "/server", "/msg")):
+                if self.clients[sock]["is_muted"] and not text.startswith(("/quit", "/who", "/realname", "/ip", "/files", "/download", "/clear", "/server", "/msg")):
                     sock.sendall(b"Error: You are currently muted by an operator.\n")
                     continue
 
@@ -492,7 +503,7 @@ class RoomServer:
                         names = ", ".join([c["username"] for c in self.clients.values()])
                     cleared_help = (
                         f"Welcome to '{self.room_name}', {username}!\n"
-                        "Commands: /quit, /who, /realname, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3"
+                        "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3"
                     )
                     if self._is_admin(sock):
                         cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop"
@@ -581,6 +592,10 @@ class RoomServer:
                         realnames = [f" - {c['username']}: {c['email']}" for c in self.clients.values()]
                     list_str = "\n".join(realnames)
                     sock.sendall(f"[Verified Email List]\n{list_str}\n".encode("utf-8"))
+                    continue
+                if text.startswith("/ip"):
+                    server_ip = get_lan_ip()
+                    sock.sendall(f"[Server Info] Server IP: {server_ip}:{self.port}\n".encode("utf-8"))
                     continue
 
                 if text.startswith("/msg "):
@@ -2099,3 +2114,5 @@ if __name__ == "__main__":
 # Personal, private, non-commercial use only.
 # No redistribution, modifications, or public use allowed.
 # ==========================================
+
+```
