@@ -23,6 +23,12 @@ from email.message import EmailMessage
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 
+try:
+    from pynput import keyboard as pynput_keyboard
+    HAS_PYNPUT = True
+except ImportError:
+    HAS_PYNPUT = False
+
 VERSION = "V2.0.1"
 DISCOVERY_PORT = 54545
 PORT_POOL_START = 5000
@@ -445,7 +451,7 @@ class RoomServer:
             
             help_msg = (
                 f"Welcome to '{self.room_name}', {username}!\n"
-                "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /eject_level <0|1|2|3>, /eject_level_show <0|1|2|3>, /opme, /clist"
+                "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /eject_level <0|1|2|3>, /show_ejection_level <0|1|2|3>, /opme, /clist"
             )
             if self._is_admin(sock):
                 help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password"
@@ -476,13 +482,8 @@ class RoomServer:
                 if text.startswith("EJECT_BROADCAST:"):
                     lvl_val = int(text.split(":", 1)[1].strip())
                     sock_info = self.clients.get(sock, {})
-                    show_filter = sock_info.get("eject_level_show", 1) # Default 1 shows all
+                    show_filter = sock_info.get("show_ejection_level", 1) # Default 1 shows all
                     
-                    # Logic: 
-                    # show_filter == 0: fully off (show nothing)
-                    # show_filter == 1: show 1, 2, 3
-                    # show_filter == 2: show 2, 3
-                    # show_filter == 3: show only 3
                     should_show = False
                     if show_filter == 1 and lvl_val in (1, 2, 3):
                         should_show = True
@@ -495,7 +496,7 @@ class RoomServer:
                         self._broadcast(f"SYS_ALERT:** {username} has ejected: Level {lvl_val} ejection **\n")
                     continue
 
-                if self.clients[sock]["is_muted"] and not text.startswith(("/quit", "/who", "/realname", "/ip", "/files", "/download", "/clear", "/server", "/msg", "/clist", "/eject_level", "/eject_level_show")):
+                if self.clients[sock]["is_muted"] and not text.startswith(("/quit", "/who", "/realname", "/ip", "/files", "/download", "/clear", "/server", "/msg", "/clist", "/eject_level", "/show_ejection_level")):
                     sock.sendall(b"Error: You are currently muted by an operator.\n")
                     continue
 
@@ -504,7 +505,7 @@ class RoomServer:
                         names = ", ".join([c["username"] for c in self.clients.values()])
                     cleared_help = (
                         f"Welcome to '{self.room_name}', {username}!\n"
-                        "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /eject_level <0|1|2|3>, /eject_level_show <0|1|2|3>, /opme, /clist"
+                        "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /eject_level <0|1|2|3>, /show_ejection_level <0|1|2|3>, /opme, /clist"
                     )
                     if self._is_admin(sock):
                         cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password"
@@ -527,7 +528,7 @@ class RoomServer:
                         "  /clear or /clearchat - Clear chat screen buffer\n"
                         "  /ui <1|2|3|4> - Change UI theme\n"
                         "  /eject_level <0|1|2|3> - Configure emergency eject level (0:Off, 1:Minimize, 2:Leave Room, 3:Quit App, or type 'zz' anytime)\n"
-                        "  /eject_level_show <0|1|2|3> - Set broadcast visibility filter for high-level ejections (0:Off, 1:All, 2:2&3, 3:Only 3)\n"
+                        "  /show_ejection_level <0|1|2|3> - Set broadcast visibility filter for high-level ejections (0:Off, 1:All, 2:2&3, 3:Only 3)\n"
                         "  /opme <password> - Gain operator privileges using the OP password\n"
                         "  /clist - Display this command help list"
                     )
@@ -558,16 +559,16 @@ class RoomServer:
                         sock.sendall((user_cmds + "\n").encode("utf-8"))
                     continue
 
-                if text.startswith("/eject_level_show"):
+                if text.startswith("/show_ejection_level"):
                     parts = text.split(" ", 1)
                     if len(parts) == 2 and parts[1].strip() in ("0", "1", "2", "3"):
                         show_val = int(parts[1].strip())
                         with self.lock:
                             if sock in self.clients:
-                                self.clients[sock]["eject_level_show"] = show_val
+                                self.clients[sock]["show_ejection_level"] = show_val
                         sock.sendall(f"SYS_ALERT:** Eject level show filter updated to {show_val} **\n".encode("utf-8"))
                     else:
-                        sock.sendall(b"Usage: /eject_level_show <0 | 1 | 2 | 3>\n")
+                        sock.sendall(b"Usage: /show_ejection_level <0 | 1 | 2 | 3>\n")
                     continue
 
                 if text.startswith("/op_password_what"):
@@ -1148,6 +1149,8 @@ class RoomServer:
 
 
 class ChatApp:
+    _last_global_z_time = 0
+
     def __init__(self, root):
         self.root = root
         self.root.title(f"LAN-Link {VERSION}")
@@ -1169,9 +1172,18 @@ class ChatApp:
         self.eject_level = 0
         self.last_z_time = 0
         
-        # Global binding so it works even when unfocused
+        # In-app Tkinter binding fallback
         self.root.bind_all("<KeyPress-z>", self._check_z_keypress)
         self.root.bind_all("<KeyPress-Z>", self._check_z_keypress)
+
+        # Global system-wide listener when outside Python GUI (requires pynput)
+        if HAS_PYNPUT:
+            try:
+                self.global_listener = pynput_keyboard.Listener(on_press=self._on_global_keypress)
+                self.global_listener.daemon = True
+                self.global_listener.start()
+            except Exception:
+                pass
 
         self.my_shared_files = {}
         self.pending_share_filepath = None
@@ -1671,6 +1683,17 @@ class ChatApp:
                 self._trigger_eject()
                 return "break"
         self.last_z_time = current_time
+
+    def _on_global_keypress(self, key):
+        try:
+            if hasattr(key, 'char') and key.char and key.char.lower() == 'z':
+                current_time = time.time()
+                if current_time - ChatApp._last_global_z_time < 0.6:
+                    if self.eject_level > 0:
+                        self.root.after(0, self._trigger_eject)
+                ChatApp._last_global_z_time = current_time
+        except Exception:
+            pass
 
     def _append_chat(self, text, is_history=False):
         if not is_history:
