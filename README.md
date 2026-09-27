@@ -7,4 +7,3 @@ Works On Linux and Windows
 
 The recent 1.2.3 is newest and easiest to use but tools from the LHS Beta will be moving onto normal LAN-Link in a attempt to combine them into 1 file that can do it all.
 
-TUI for LAN-Link coming out soon
