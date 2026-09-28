@@ -2288,7 +2288,7 @@ class ChatApp:
                     if target_host in ("127.0.0.1", "::1", "localhost"):
                         target_host = "127.0.0.1"
 
-                    s = socket.socket(socket.AF_INET, socket.STREAM)
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.settimeout(10)
                     s.connect((target_host, file_port))
                     s.settimeout(None)
