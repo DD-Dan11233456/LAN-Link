@@ -1248,12 +1248,18 @@ class ChatApp:
             pass
         
         if char == 'alt':
-            self.root.bind_all("<Alt_L>", self._check_keypress)
-            self.root.bind_all("<Alt_R>", self._check_keypress)
-            self.root.bind_all("<Alt>", self._check_keypress)
+            # "<Alt>" is only a modifier in Tk, not a keysym, so bind the real keys
+            for seq in ("<Alt_L>", "<Alt_R>"):
+                try:
+                    self.root.bind_all(seq, self._check_keypress)
+                except tk.TclError:
+                    pass
         else:
-            self.root.bind_all(f"<KeyPress-{char}>", self._check_keypress)
-            self.root.bind_all(f"<KeyPress-{char.upper()}>", self._check_keypress)
+            for seq in (f"<KeyPress-{char}>", f"<KeyPress-{char.upper()}>"):
+                try:
+                    self.root.bind_all(seq, self._check_keypress)
+                except tk.TclError:
+                    pass
 
     def _file_server_accept_loop(self):
         while True:
