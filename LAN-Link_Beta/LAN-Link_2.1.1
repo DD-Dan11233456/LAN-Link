@@ -26,7 +26,8 @@ from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 try:
     from pynput import keyboard as pynput_keyboard
     HAS_PYNPUT = True
-except ImportError:
+except Exception:  # ImportError, or backend errors (no display, missing Xlib, etc.)
+    pynput_keyboard = None
     HAS_PYNPUT = False
 
 VERSION = "V2.1.1"
@@ -1191,18 +1192,16 @@ class ChatApp:
         self.eject_level = 0
         self.eject_key = 'alt'
         self.last_key_time = 0
+        self._tk_key_down = False        # ignores OS auto-repeat while a key is held (in-app)
+        self._global_key_down = False    # same, for the system-wide listener
+        self._last_eject_time = 0        # stops one double-tap from ejecting twice
+        self.global_listener = None
         
-        # Permanently bind the fixed eject key
+        # In-app binding (works whenever the LAN-Link window has focus, on every OS)
         self._bind_eject_key(self.eject_key)
 
-        # Global system-wide listener when outside Python GUI (requires pynput)
-        if HAS_PYNPUT:
-            try:
-                self.global_listener = pynput_keyboard.Listener(on_press=self._on_global_keypress)
-                self.global_listener.daemon = True
-                self.global_listener.start()
-            except Exception:
-                pass
+        # System-wide listener for when the window is NOT focused (requires pynput)
+        self._start_global_listener()
 
         self.my_shared_files = {}
         self.pending_share_filepath = None
@@ -1242,24 +1241,44 @@ class ChatApp:
 
     def _bind_eject_key(self, char):
         char = char.lower()
-        try:
-            self.root.unbind_all("<KeyPress>")
-        except Exception:
-            pass
-        
+        for seq in ("<KeyPress>", "<KeyRelease>"):
+            try:
+                self.root.unbind_all(seq)
+            except Exception:
+                pass
+
         if char == 'alt':
-            # "<Alt>" is only a modifier in Tk, not a keysym, so bind the real keys
-            for seq in ("<Alt_L>", "<Alt_R>"):
-                try:
-                    self.root.bind_all(seq, self._check_keypress)
-                except tk.TclError:
-                    pass
+            # "<Alt>" is only a modifier in Tk, not a keysym. Bind the real keys instead.
+            # Meta_*/ISO_Level3_Shift/Mode_switch cover Linux keymaps where Alt/AltGr
+            # are reported under a different name. Unknown names are skipped safely.
+            keysyms = ("Alt_L", "Alt_R", "Meta_L", "Meta_R", "ISO_Level3_Shift", "Mode_switch")
         else:
-            for seq in (f"<KeyPress-{char}>", f"<KeyPress-{char.upper()}>"):
+            keysyms = (char, char.upper()) if len(char) == 1 else (char,)
+
+        for ks in keysyms:
+            for event, handler in (("KeyPress", self._check_keypress),
+                                   ("KeyRelease", self._on_eject_key_release)):
                 try:
-                    self.root.bind_all(seq, self._check_keypress)
+                    self.root.bind_all(f"<{event}-{ks}>", handler)
                 except tk.TclError:
                     pass
+
+    def _start_global_listener(self):
+        if not HAS_PYNPUT:
+            print("LAN-Link: 'pynput' is not installed, so the eject key only works while "
+                  "the window is focused. Install it with:  pip install pynput", file=sys.stderr)
+            return
+        try:
+            self.global_listener = pynput_keyboard.Listener(
+                on_press=self._on_global_keypress,
+                on_release=self._on_global_keyrelease,
+            )
+            self.global_listener.daemon = True
+            self.global_listener.start()
+        except Exception as e:
+            self.global_listener = None
+            print(f"LAN-Link: system-wide eject key unavailable ({e}). "
+                  "It will only work while the window is focused.", file=sys.stderr)
 
     def _file_server_accept_loop(self):
         while True:
@@ -1726,38 +1745,60 @@ class ChatApp:
                     pass
             self._on_close()
 
-    def _check_keypress(self, event):
-        current_time = time.time()
-        if current_time - self.last_key_time < 0.6:
-            if self.eject_level > 0:
+    def _register_eject_tap(self, source, when=None):
+        """Counts one physical tap. Must run on the Tk main thread."""
+        now = when or time.time()
+        attr = "last_key_time" if source == "tk" else "_last_global_key_time_inst"
+        last = getattr(self, attr, 0)
+        setattr(self, attr, now)
+        if now - last < 0.6 and self.eject_level > 0:
+            # Debounce: the in-app and system-wide listeners can both see the same tap
+            if now - self._last_eject_time > 1.0:
+                self._last_eject_time = now
+                setattr(self, attr, 0)
                 self._trigger_eject()
-                return "break"
-        self.last_key_time = current_time
+                return True
+        return False
 
-    def _on_global_keypress(self, key):
+    def _check_keypress(self, event):
+        # Ignore auto-repeat: holding the key down must not count as a double-tap
+        if self._tk_key_down:
+            return "break"
+        self._tk_key_down = True
+        if self._register_eject_tap("tk"):
+            return "break"
+
+    def _on_eject_key_release(self, event):
+        self._tk_key_down = False
+
+    def _on_global_keyrelease(self, key):
+        if self._is_eject_key(key):
+            self._global_key_down = False
+
+    def _is_eject_key(self, key):
         try:
             char_val = None
-            if hasattr(key, 'char') and key.char:
+            if getattr(key, 'char', None):
                 char_val = key.char.lower()
-            elif hasattr(key, 'name') and key.name:
+            elif getattr(key, 'name', None):
                 char_val = key.name.lower()
 
-            is_match = False
             if self.eject_key.lower() == 'alt':
-                if key in (pynput_keyboard.Key.alt, pynput_keyboard.Key.alt_l, pynput_keyboard.Key.alt_r, pynput_keyboard.Key.alt_gr):
-                    is_match = True
-                elif char_val and 'alt' in char_val:
-                    is_match = True
-            else:
-                if char_val and char_val == self.eject_key.lower():
-                    is_match = True
+                alts = {getattr(pynput_keyboard.Key, n) for n in
+                        ("alt", "alt_l", "alt_r", "alt_gr") if hasattr(pynput_keyboard.Key, n)}
+                return key in alts or bool(char_val and 'alt' in char_val)
+            return bool(char_val and char_val == self.eject_key.lower())
+        except Exception:
+            return False
 
-            if is_match:
-                current_time = time.time()
-                if current_time - ChatApp._last_global_key_time < 0.6:
-                    if self.eject_level > 0:
-                        self.root.after(0, self._trigger_eject)
-                ChatApp._last_global_key_time = current_time
+    def _on_global_keypress(self, key):
+        # Runs on pynput's thread: never touch Tk here, hand off via the queue instead.
+        try:
+            if self._is_eject_key(key):
+                if self._global_key_down:
+                    return  # auto-repeat
+                self._global_key_down = True
+                self.event_queue.put(("eject_tap", ("global", time.time())))
         except Exception:
             pass
 
@@ -1924,6 +1965,8 @@ class ChatApp:
                     self._populate_rooms(payload)
                 elif kind == "chat":
                     self._append_chat(payload)
+                elif kind == "eject_tap":
+                    self._register_eject_tap(*payload)
                 elif kind == "clear_chat":
                     self.chat_history.clear()
                     self.chat_box.configure(state="normal")
@@ -2425,6 +2468,11 @@ class ChatApp:
 
     def _on_close(self):
         self.connected = False
+        try:
+            if self.global_listener:
+                self.global_listener.stop()
+        except Exception:
+            pass
         if self.sock:
             try:
                 self.sock.close()
