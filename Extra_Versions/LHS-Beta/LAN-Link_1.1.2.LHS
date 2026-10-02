@@ -242,7 +242,6 @@ class RoomServer:
         self.is_locked = False
         self.join_muted = False    # Auto-mute newly joined users
         self.op_password = "no"
-        self.bot_enabled = False   # Automated join bot switch (/bot_on & /bot_off)
         self.banned_records = []   # list of {"username": lower str, "ip": str, "email": lower str or ""}
 
         # File sharing registry
@@ -466,29 +465,12 @@ class RoomServer:
 
             self._broadcast(f"SYS_JOIN:** {username} joined the room **\n", exclude=sock)
 
-            # Automated Bot Task (Triggered 30-60 seconds after joining if bot is enabled)
-            def _bot_delayed_prompt():
-                delay = random.randint(30, 60)
-                time.sleep(delay)
-                with self.lock:
-                    if not self.running or sock not in self.clients or not self.bot_enabled:
-                        return
-                timestamp = time.strftime("%H:%M:%S")
-                bot_message = f"[BOT] [{timestamp}] Hello {username}! What room are you in?\n"
-                try:
-                    sock.sendall(bot_message.encode("utf-8"))
-                except OSError:
-                    pass
-
-            if self.bot_enabled:
-                threading.Thread(target=_bot_delayed_prompt, daemon=True).start()
-            
             help_msg = (
                 f"Welcome to '{self.room_name}', {username}!\n"
                 "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /opme, /clist"
             )
             if self._is_admin(sock):
-                help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot_on, /bot_off"
+                help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot"
             sock.sendall((help_msg + "\n").encode("utf-8"))
 
             if should_mute:
@@ -515,7 +497,7 @@ class RoomServer:
                         "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /opme, /clist"
                     )
                     if self._is_admin(sock):
-                        cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot_on, /bot_off"
+                        cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot"
                     sock.sendall(f"CLEAR_CHAT_TRIGGER\n{cleared_help}\nOnline: {names}\n".encode("utf-8"))
                     continue
                 
@@ -559,28 +541,20 @@ class RoomServer:
                             "  /unop <user> - Revoke operator privileges from a user\n"
                             "  /op_password <pw|no> - Set or disable the /opme password\n"
                             "  /op_password_what - Reveal the current operator password\n"
-                            "  /bot_on - Enable the automated greeting and room question bot\n"
-                            "  /bot_off - Disable the automated bot"
+                            "  /bot - Ask the bot to say hello and tell you what room you are in"
                         )
                         sock.sendall((user_cmds + op_cmds + "\n").encode("utf-8"))
                     else:
                         sock.sendall((user_cmds + "\n").encode("utf-8"))
                     continue
 
-                if text.startswith("/bot_on"):
+                if text == "/bot" or text.startswith("/bot "):
                     if not self._is_admin(sock):
-                        sock.sendall(b"Error: Operator privileges required for /bot_on.\n")
+                        sock.sendall(b"Error: Operator privileges required for /bot.\n")
                         continue
-                    self.bot_enabled = True
-                    self._broadcast("SYS_ALERT:** Automated Bot has been ENABLED by an operator **\n")
-                    continue
-
-                if text.startswith("/bot_off"):
-                    if not self._is_admin(sock):
-                        sock.sendall(b"Error: Operator privileges required for /bot_off.\n")
-                        continue
-                    self.bot_enabled = False
-                    self._broadcast("SYS_ALERT:** Automated Bot has been DISABLED by an operator **\n")
+                    timestamp = time.strftime("%H:%M:%S")
+                    bot_message = f"[BOT] [{timestamp}] Hello {username}! You are in room '{self.room_name}'.\n"
+                    self._broadcast(bot_message)
                     continue
 
                 if text.startswith("/op_password_what"):
@@ -989,7 +963,6 @@ class RoomServer:
                             f"  LAN Address     : {get_lan_ip()}:{self.port}",
                             f"  Room Lock Status: {'LOCKED' if self.is_locked else 'UNLOCKED'}",
                             f"  Join Muted      : {'ENABLED' if self.join_muted else 'DISABLED'}",
-                            f"  Automated Bot   : {'ENABLED' if self.bot_enabled else 'DISABLED'}",
                             f"  Online Clients  : {len(self.clients)} ({op_count} Operators)",
                             f"  Muted Clients   : {muted_count}",
                             f"  Shared Files    : {len(self.shared_files)}",
