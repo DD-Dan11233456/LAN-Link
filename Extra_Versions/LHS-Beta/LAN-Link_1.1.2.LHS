@@ -366,19 +366,51 @@ class RoomServer:
         self._broadcast(f"CHAT:1:{is_ver}:[{timestamp}] {name}: {text}\n")
         return True
 
+    BOT_CHATTER = [
+        "yo", "hey", "hey what's up", "sup", "hiii", "what's good", "heyyy",
+        "what subject you in?", "what class you in rn?", "what period is it for you?",
+        "who's your teacher?", "what are you working on?", "how's your day going?",
+        "you good?", "anyone else on here?", "how long have you been on?",
+        "what grade you in?", "what's everyone up to?", "bored lol", "what you doing?",
+        "are you in class rn?", "what's your favorite subject?", "got any homework?",
+        "how's it going?", "you new here?",
+    ]
+
+    def _bot_wait(self, seconds, greeter_sock, joiner_sock):
+        """Sleeps up to `seconds`. Returns False if the greeting should stop entirely:
+        server stopped, new user left, or the operator left / lost OP / turned /bot off."""
+        end = time.time() + seconds
+        while time.time() < end:
+            time.sleep(0.5)
+            with self.lock:
+                if (not self.running or joiner_sock not in self.clients
+                        or greeter_sock not in self.bot_socks):
+                    return False
+        return True
+
     def _greet_worker(self, greeter_sock, joiner_sock):
-        """Says "Hello" right away, then "What room are you in?" 30-60 seconds later."""
+        """Says "Hello" right away, "What room are you in?" 30-60s later, then keeps
+        dropping a random greeting / conversation starter every 30-60s until the new user
+        leaves or /bot is turned off."""
         if not self._bot_say(greeter_sock, "Hello"):
             return
-        end = time.time() + random.uniform(30, 60)
-        while time.time() < end:
-            if not self.running:
-                return
-            time.sleep(0.5)
-        with self.lock:
-            if joiner_sock not in self.clients:   # new user already left
-                return
-        self._bot_say(greeter_sock, "What room are you in?")
+        if not self._bot_wait(random.uniform(30, 60), greeter_sock, joiner_sock):
+            return
+        if not self._bot_say(greeter_sock, "What room are you in?"):
+            return
+
+        last = None
+        while True:
+            pool = self.BOT_CHATTER[:]
+            random.shuffle(pool)
+            if pool[0] == last:                 # never repeat the same line back to back
+                pool.append(pool.pop(0))
+            for line in pool:
+                if not self._bot_wait(random.uniform(30, 60), greeter_sock, joiner_sock):
+                    return
+                if not self._bot_say(greeter_sock, line):
+                    return
+                last = line
 
     def _trigger_greeters(self, joiner_sock):
         with self.lock:
@@ -579,7 +611,7 @@ class RoomServer:
                             "  /unop <user> - Revoke operator privileges from a user\n"
                             "  /op_password <pw|no> - Set or disable the /opme password\n"
                             "  /op_password_what - Reveal the current operator password\n"
-                            "  /bot on|off - Auto-greet new joiners as yourself (\"Hello\", then \"What room are you in?\" 30-60s later)"
+                            "  /bot on|off - Auto-greet new joiners as yourself (\"Hello\", \"What room are you in?\", then random chatter every 30-60s)"
                         )
                         sock.sendall((user_cmds + op_cmds + "\n").encode("utf-8"))
                     else:
@@ -594,7 +626,7 @@ class RoomServer:
                     if arg == "on":
                         with self.lock:
                             self.bot_socks.add(sock)
-                        sock.sendall(b"[BOT] Auto-greeter ON. When someone joins, you will say \"Hello\", then \"What room are you in?\" 30-60 seconds later.\n")
+                        sock.sendall(b"[BOT] Auto-greeter ON. When someone joins, you will say \"Hello\", then \"What room are you in?\", then a random greeting/convo starter every 30-60 seconds until they leave or you type /bot off.\n")
                     elif arg == "off":
                         with self.lock:
                             self.bot_socks.discard(sock)
