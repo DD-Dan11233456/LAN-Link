@@ -242,6 +242,7 @@ class RoomServer:
         self.is_locked = False
         self.join_muted = False    # Auto-mute newly joined users
         self.op_password = "no"
+        self.bot_socks = set()     # sockets of operators who have /bot on (auto-greet new joiners)
         self.banned_records = []   # list of {"username": lower str, "ip": str, "email": lower str or ""}
 
         # File sharing registry
@@ -341,6 +342,7 @@ class RoomServer:
 
     def _cleanup_disconnected_client_locked(self, sock):
         self.clients.pop(sock, None)
+        self.bot_socks.discard(sock)
         if self.host_socket == sock:
             self.host_socket = None
         to_remove = [fid for fid, info in self.shared_files.items() if info["owner_sock"] == sock]
@@ -350,6 +352,39 @@ class RoomServer:
                 _, ext = os.path.splitext(removed['filename'])
                 ext_label = ext if ext else "no ext"
                 self._broadcast(f"SYS_ALERT:** File '{removed['filename']}' (ID {fid} [{ext_label}]) removed because owner disconnected **\n")
+
+    def _bot_say(self, sock, text):
+        """Posts `text` to the room as if the operator behind `sock` typed it.
+        Returns False (and sends nothing) if that operator left, lost OP, or turned /bot off."""
+        with self.lock:
+            info = self.clients.get(sock)
+            if not info or sock not in self.bot_socks or not self._is_admin(sock):
+                return False
+            timestamp = time.strftime("%H:%M:%S")
+            is_ver = "1" if ("@" in info["email"]) else "0"
+            name = info["username"]
+        self._broadcast(f"CHAT:1:{is_ver}:[{timestamp}] {name}: {text}\n")
+        return True
+
+    def _greet_worker(self, greeter_sock, joiner_sock):
+        """Says "Hello" right away, then "What room are you in?" 30-60 seconds later."""
+        if not self._bot_say(greeter_sock, "Hello"):
+            return
+        end = time.time() + random.uniform(30, 60)
+        while time.time() < end:
+            if not self.running:
+                return
+            time.sleep(0.5)
+        with self.lock:
+            if joiner_sock not in self.clients:   # new user already left
+                return
+        self._bot_say(greeter_sock, "What room are you in?")
+
+    def _trigger_greeters(self, joiner_sock):
+        with self.lock:
+            greeters = [g for g in self.bot_socks if g is not joiner_sock and g in self.clients]
+        for g in greeters:
+            threading.Thread(target=self._greet_worker, args=(g, joiner_sock), daemon=True).start()
 
     def _is_admin(self, sock):
         info = self.clients.get(sock, {})
@@ -470,11 +505,14 @@ class RoomServer:
                 "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /opme, /clist"
             )
             if self._is_admin(sock):
-                help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot"
+                help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot on|off"
             sock.sendall((help_msg + "\n").encode("utf-8"))
 
             if should_mute:
                 sock.sendall(b"SYS_ALERT:** You have been automatically muted upon joining this room. **\n")
+
+            # /bot on: every operator with the greeter enabled greets this new user
+            self._trigger_greeters(sock)
 
             f_in = sock.makefile('r', encoding='utf-8', errors='ignore')
             for line in f_in:
@@ -497,7 +535,7 @@ class RoomServer:
                         "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /opme, /clist"
                     )
                     if self._is_admin(sock):
-                        cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot"
+                        cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /op_password_what, /bot on|off"
                     sock.sendall(f"CLEAR_CHAT_TRIGGER\n{cleared_help}\nOnline: {names}\n".encode("utf-8"))
                     continue
                 
@@ -541,7 +579,7 @@ class RoomServer:
                             "  /unop <user> - Revoke operator privileges from a user\n"
                             "  /op_password <pw|no> - Set or disable the /opme password\n"
                             "  /op_password_what - Reveal the current operator password\n"
-                            "  /bot - Ask the bot to say hello and tell you what room you are in"
+                            "  /bot on|off - Auto-greet new joiners as yourself (\"Hello\", then \"What room are you in?\" 30-60s later)"
                         )
                         sock.sendall((user_cmds + op_cmds + "\n").encode("utf-8"))
                     else:
@@ -552,9 +590,19 @@ class RoomServer:
                     if not self._is_admin(sock):
                         sock.sendall(b"Error: Operator privileges required for /bot.\n")
                         continue
-                    timestamp = time.strftime("%H:%M:%S")
-                    bot_message = f"[BOT] [{timestamp}] Hello {username}! You are in room '{self.room_name}'.\n"
-                    self._broadcast(bot_message)
+                    arg = text[4:].strip().lower()
+                    if arg == "on":
+                        with self.lock:
+                            self.bot_socks.add(sock)
+                        sock.sendall(b"[BOT] Auto-greeter ON. When someone joins, you will say \"Hello\", then \"What room are you in?\" 30-60 seconds later.\n")
+                    elif arg == "off":
+                        with self.lock:
+                            self.bot_socks.discard(sock)
+                        sock.sendall(b"[BOT] Auto-greeter OFF.\n")
+                    else:
+                        with self.lock:
+                            state = "ON" if sock in self.bot_socks else "OFF"
+                        sock.sendall(f"[BOT] Auto-greeter is {state}. Usage: /bot on | /bot off\n".encode("utf-8"))
                     continue
 
                 if text.startswith("/op_password_what"):
@@ -873,6 +921,7 @@ class RoomServer:
                                 target_sock = s
                                 target_name = info["username"]
                                 info["is_op"] = False
+                                self.bot_socks.discard(target_sock)
                                 break
                     if target_sock:
                         self._broadcast(f"SYS_ALERT:** {target_name} operator status was revoked by {username} **\n")
