@@ -1745,7 +1745,7 @@ class ChatApp:
         self.chat_box.tag_configure("op_purple", foreground="#8A2BE2", font=("", 9, "bold"))
         self.chat_box.tag_configure("verified_gold", foreground="#D4AF37", font=("", 9, "bold"))
         self.chat_box.tag_configure("afk_green", foreground="#28A745", font=("", 9, "bold"))
-        self.chat_box.tag_configure("baby_blue", foreground="#89CFF0", font=("", 9, "bold"))
+        self.chat_box.tag_configure("baby_blue", foreground="#3A7BD5", font=("", 9, "bold"))
         self.chat_box.tag_configure("mango_name", foreground="#32CD32", font=("", 9, "bold"))
         self.chat_box.tag_configure("mango_text", foreground="#FF8C1A")
 
@@ -1932,7 +1932,7 @@ class ChatApp:
             self.chat_box.configure(state="disabled")
             return
 
-        _blue_tag_lines = ("[General Commands]", "[End Of Command List]", "[End Of User Info]")
+        _blue_tag_lines = ("[General Commands]", "[Operator Commands]", "[End Of Command List]", "[End Of User Info]")
         if line.strip() in _blue_tag_lines:
             self.chat_box.insert("end", line, "baby_blue")
             self.chat_box.see("end")
@@ -2073,7 +2073,7 @@ class ChatApp:
                     _insert_text(line, "join_green")
                 elif "left the room" in line:
                     _insert_text(line, "leave_red")
-                elif ("kicked" in line.lower() or "banned" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]") and not "/config join_muted" in line and not line.startswith("  ") and not line.startswith("[Advanced Server Statistics]"):
+                elif ("kicked" in line.lower() or "banned" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]") and not "/config join_muted" in line and not line.startswith("  ") and not line.startswith("/") and not line.startswith("[Advanced Server Statistics]"):
                     _insert_text(line, "alert_orange")
                 elif line.startswith("[ANNOUNCEMENT]"):
                     _insert_text(line, "announcement")
