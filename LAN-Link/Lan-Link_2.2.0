@@ -1926,8 +1926,21 @@ class ChatApp:
                 else:
                     self.chat_box.insert("end", text_to_insert)
 
+        _blue_header_prefixes = (
+            "[User Info]", "[Verified Email List]", "[Shared Files in Room]",
+            "[Muted Members]", "[Banned Records List]", "[Config Usage]",
+            "[Advanced Server Statistics]",
+        )
+
         if line.startswith("STATS:"):
-            _insert_text(line[6:])
+            stats_line = line[6:]
+            for _pfx in _blue_header_prefixes:
+                if stats_line.startswith(_pfx):
+                    self.chat_box.insert("end", _pfx, "baby_blue")
+                    self.chat_box.insert("end", stats_line[len(_pfx):])
+                    break
+            else:
+                _insert_text(stats_line)
             self.chat_box.see("end")
             self.chat_box.configure(state="disabled")
             return
@@ -1938,12 +1951,13 @@ class ChatApp:
             self.chat_box.see("end")
             self.chat_box.configure(state="disabled")
             return
-        if line.startswith("[User Info]"):
-            self.chat_box.insert("end", "[User Info]", "baby_blue")
-            self.chat_box.insert("end", line[len("[User Info]"):])
-            self.chat_box.see("end")
-            self.chat_box.configure(state="disabled")
-            return
+        for _pfx in _blue_header_prefixes:
+            if line.startswith(_pfx):
+                self.chat_box.insert("end", _pfx, "baby_blue")
+                self.chat_box.insert("end", line[len(_pfx):])
+                self.chat_box.see("end")
+                self.chat_box.configure(state="disabled")
+                return
 
         if self.ui_mode == 3:
             if line.startswith("SYS_JOIN:"):
