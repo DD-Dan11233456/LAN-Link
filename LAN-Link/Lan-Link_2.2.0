@@ -683,6 +683,7 @@ class RoomServer:
                                 _, ext = os.path.splitext(info['filename'])
                                 ext_label = ext if ext else "no ext"
                                 file_list_str += f"  ID {fid} ({ext_label}): '{info['filename']}' (Shared by {info['owner_name']}, {info['filesize']} bytes)\n"
+                            file_list_str += "[End Of Shared Files List]\n"
                             sock.sendall(file_list_str.encode("utf-8"))
                     continue
 
@@ -805,7 +806,7 @@ class RoomServer:
                     with self.lock:
                         realnames = [f" - {c['username']}{' (AFK)' if c.get('is_afk') else ''}: {c['email']}" for c in self.clients.values()]
                     list_str = "\n".join(realnames)
-                    sock.sendall(f"[Verified Email List]\n{list_str}\n".encode("utf-8"))
+                    sock.sendall(f"[Verified Email List]\n{list_str}\n[End Of Verified Email List]\n".encode("utf-8"))
                     continue
 
                 if text.startswith("/ip"):
@@ -915,7 +916,7 @@ class RoomServer:
                         sock.sendall(b"No members are currently muted.\n")
                     else:
                         list_str = "\n".join(f"  - {name}" for name in muted_names)
-                        sock.sendall(f"[Muted Members] ({len(muted_names)})\n{list_str}\n".encode("utf-8"))
+                        sock.sendall(f"[Muted Members] ({len(muted_names)})\n{list_str}\n[End Of Muted Members]\n".encode("utf-8"))
                     continue
 
                 if text.startswith("/mute "):
@@ -1046,6 +1047,7 @@ class RoomServer:
                             b"  /config domain <domain | none>\n"
                             b"  /config verify <on | off>\n"
                             b"  /config join_muted <on | off>\n"
+                            b"[End Of Config Usage]\n"
                         )
                         continue
                     key, val = parts[1].lower(), parts[2].strip()
@@ -1100,6 +1102,7 @@ class RoomServer:
                             f"  Verified (2FA)  : {self.is_verified}",
                             f"  Domain Restr.   : {self.domain_restriction if self.domain_restriction else 'None'}",
                             f"  Banned Summary  : {len(self.banned_records)} entrie(s)",
+                            "[End Of Advanced Server Statistics]",
                         ]
                         stats = "".join(f"STATS:{ln}\n" for ln in stats_lines)
                     sock.sendall(stats.encode("utf-8"))
@@ -1199,6 +1202,7 @@ class RoomServer:
                                 u = rec["username"] if rec["username"] else "N/A"
                                 e = rec["email"] if rec["email"] else "N/A"
                                 ban_str += f"  {idx}. User: '{u}' | IP: '{rec['ip']}' | Email: '{e}'\n"
+                            ban_str += "[End Of Banned Records List]\n"
                             sock.sendall(ban_str.encode("utf-8"))
                     continue
 
@@ -1940,12 +1944,19 @@ class ChatApp:
                     self.chat_box.insert("end", stats_line[len(_pfx):])
                     break
             else:
-                _insert_text(stats_line)
+                if stats_line.strip() in ("[End Of Advanced Server Statistics]",):
+                    self.chat_box.insert("end", stats_line, "baby_blue")
+                else:
+                    _insert_text(stats_line)
             self.chat_box.see("end")
             self.chat_box.configure(state="disabled")
             return
 
-        _blue_tag_lines = ("[General Commands]", "[Operator Commands]", "[End Of Command List]", "[End Of User Info]")
+        _blue_tag_lines = (
+            "[General Commands]", "[Operator Commands]", "[End Of Command List]", "[End Of User Info]",
+            "[End Of Verified Email List]", "[End Of Shared Files List]", "[End Of Muted Members]",
+            "[End Of Banned Records List]", "[End Of Config Usage]", "[End Of Advanced Server Statistics]",
+        )
         if line.strip() in _blue_tag_lines:
             self.chat_box.insert("end", line, "baby_blue")
             self.chat_box.see("end")
