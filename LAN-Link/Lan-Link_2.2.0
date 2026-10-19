@@ -454,7 +454,7 @@ class RoomServer:
             
             help_msg = (
                 f"Welcome to '{self.room_name}', {username}!\n"
-                "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /afk, /status <text>, /info <user>, /eject_level <0|1|2|3>, /show_ejection_level <0|1|2|3>, /opme, /clist"
+                "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /afk, /status <text>, /info <user>, /pause, /unpause, /eject_level <0|1|2|3>, /show_ejection_level <0|1|2|3>, /opme, /clist"
             )
             if self._is_admin(sock):
                 help_msg += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /export"
@@ -524,7 +524,7 @@ class RoomServer:
                         names = ", ".join([f"{c['username']}{' (Host)' if c['is_host'] else (' (Op)' if c['is_op'] else '')}{' [Muted]' if c['is_muted'] else ''}{' (AFK)' if c.get('is_afk') else ''}" for c in self.clients.values()])
                     cleared_help = (
                         f"Welcome to '{self.room_name}', {username}!\n"
-                        "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /afk, /status <text>, /info <user>, /eject_level <0|1|2|3>, /show_ejection_level <0|1|2|3>, /opme, /clist"
+                        "Commands: /quit, /who, /realname, /ip, /msg <user> <msg>, /server <msg>, /share, /files, /download <id>, /clear, /ui 1|2|3|4, /afk, /status <text>, /info <user>, /pause, /unpause, /eject_level <0|1|2|3>, /show_ejection_level <0|1|2|3>, /opme, /clist"
                     )
                     if self._is_admin(sock):
                         cleared_help += ", /kick, /ban, /unban, /banlist, /mute, /unmute, /muteall, /unmuteall, /mutelist, /lock, /unlock, /password, /config, /advance, /announce, /op, /unop, /op_password, /export"
@@ -534,7 +534,7 @@ class RoomServer:
                 if text.startswith("/clist"):
                     is_admin = self._is_admin(sock)
                     user_cmds = (
-                        "[General User Commands]\n"
+                        "[General Commands]\n"
                         "  /quit - Disconnect and leave the chat room\n"
                         "  /who - List all users currently online in the room\n"
                         "  /realname - Display emails of 2FA verified users\n"
@@ -552,6 +552,8 @@ class RoomServer:
                         "  /eject_level <0|1|2|3> - Configure emergency eject level (0:Off, 1:Minimize, 2:Minimize&Leave, 3:Quit App)\n"
                         "  /show_ejection_level <0|1|2|3> - Set broadcast visibility filter for high-level ejections (0:Off, 1:All, 2:2&3, 3:Only 3)\n"
                         "  /opme <password> - Gain operator privileges using the OP password\n"
+                        "  /pause - Freeze your chat screen (new messages are held back)\n"
+                        "  /unpause - Resume your chat screen and load all held messages\n"
                         "  /clist - Display this command help list"
                     )
                     if is_admin:
@@ -577,9 +579,9 @@ class RoomServer:
                             "  /op_password <pw|no> - Set or disable the /opme password\n"
                             "  /export - Export the loaded chat and a user/IP report to a .txt file"
                         )
-                        sock.sendall((user_cmds + op_cmds + "\n").encode("utf-8"))
+                        sock.sendall((user_cmds + op_cmds + "\n[End Of Command List]\n").encode("utf-8"))
                     else:
-                        sock.sendall((user_cmds + "\n").encode("utf-8"))
+                        sock.sendall((user_cmds + "\n[End Of Command List]\n").encode("utf-8"))
                     continue
 
                 if text.startswith("/show_ejection_level"):
@@ -751,6 +753,7 @@ class RoomServer:
                             f"  Verified: {'Yes' if '@' in found['email'] else 'No'}",
                             f"  Status: {found.get('status') or '(none)'}",
                         ]
+                        info_lines.append("[End Of User Info]")
                         sock.sendall(("\n".join(info_lines) + "\n").encode("utf-8"))
                     continue
 
@@ -1273,6 +1276,8 @@ class ChatApp:
         self.is_user_verified = False
 
         self.chat_history = []
+        self.chat_paused = False
+        self.paused_buffer = []
         self.last_sent_msg = ""
         self.eject_level = 0
         self.eject_key = 'alt'
@@ -1740,6 +1745,7 @@ class ChatApp:
         self.chat_box.tag_configure("op_purple", foreground="#8A2BE2", font=("", 9, "bold"))
         self.chat_box.tag_configure("verified_gold", foreground="#D4AF37", font=("", 9, "bold"))
         self.chat_box.tag_configure("afk_green", foreground="#28A745", font=("", 9, "bold"))
+        self.chat_box.tag_configure("baby_blue", foreground="#89CFF0", font=("", 9, "bold"))
         self.chat_box.tag_configure("mango_name", foreground="#32CD32", font=("", 9, "bold"))
         self.chat_box.tag_configure("mango_text", foreground="#FF8C1A")
 
@@ -1926,6 +1932,19 @@ class ChatApp:
             self.chat_box.configure(state="disabled")
             return
 
+        _blue_tag_lines = ("[General Commands]", "[End Of Command List]", "[End Of User Info]")
+        if line.strip() in _blue_tag_lines:
+            self.chat_box.insert("end", line, "baby_blue")
+            self.chat_box.see("end")
+            self.chat_box.configure(state="disabled")
+            return
+        if line.startswith("[User Info]"):
+            self.chat_box.insert("end", "[User Info]", "baby_blue")
+            self.chat_box.insert("end", line[len("[User Info]"):])
+            self.chat_box.see("end")
+            self.chat_box.configure(state="disabled")
+            return
+
         if self.ui_mode == 3:
             if line.startswith("SYS_JOIN:"):
                 line = line[9:]
@@ -2054,7 +2073,7 @@ class ChatApp:
                     _insert_text(line, "join_green")
                 elif "left the room" in line:
                     _insert_text(line, "leave_red")
-                elif ("kicked" in line.lower() or "banned" in line.lower() or "muted" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]") and not "/config join_muted" in line and not line.startswith("  ") and not line.startswith("[Advanced Server Statistics]"):
+                elif ("kicked" in line.lower() or "banned" in line.lower() or line.startswith("KICKED:") or line.startswith("BANNED:")) and not line.startswith("[Config Usage]") and not "/config join_muted" in line and not line.startswith("  ") and not line.startswith("[Advanced Server Statistics]"):
                     _insert_text(line, "alert_orange")
                 elif line.startswith("[ANNOUNCEMENT]"):
                     _insert_text(line, "announcement")
@@ -2077,6 +2096,34 @@ class ChatApp:
         self.chat_box.see("end")
         self.chat_box.configure(state="disabled")
 
+    def _clear_chat_screen(self):
+        self.chat_history.clear()
+        self.chat_box.configure(state="normal")
+        self.chat_box.delete("1.0", "end")
+        self.chat_box.configure(state="disabled")
+
+    def _pause_chat(self):
+        if self.chat_paused:
+            self._append_chat("SYS_ALERT:** Chat is already paused. Type /unpause to resume **", is_history=True)
+            return
+        self.chat_paused = True
+        self.paused_buffer = []
+        self._append_chat("SYS_ALERT:** Chat paused (only on your screen). New messages are held until you type /unpause **", is_history=True)
+
+    def _unpause_chat(self):
+        if not self.chat_paused:
+            self._append_chat("SYS_ALERT:** Chat is not paused **", is_history=True)
+            return
+        self.chat_paused = False
+        held = self.paused_buffer
+        self.paused_buffer = []
+        for kind, payload in held:
+            if kind == "clear_chat":
+                self._clear_chat_screen()
+            else:
+                self._append_chat(payload)
+        self._append_chat(f"SYS_ALERT:** Chat resumed. Loaded {sum(1 for k, _ in held if k == 'chat')} new message(s) **", is_history=True)
+
     def _drain_queue(self):
         try:
             while True:
@@ -2091,14 +2138,17 @@ class ChatApp:
                 elif kind == "rooms_found":
                     self._populate_rooms(payload)
                 elif kind == "chat":
-                    self._append_chat(payload)
+                    if self.chat_paused:
+                        self.paused_buffer.append(("chat", payload))
+                    else:
+                        self._append_chat(payload)
                 elif kind == "eject_tap":
                     self._register_eject_tap(*payload)
                 elif kind == "clear_chat":
-                    self.chat_history.clear()
-                    self.chat_box.configure(state="normal")
-                    self.chat_box.delete("1.0", "end")
-                    self.chat_box.configure(state="disabled")
+                    if self.chat_paused:
+                        self.paused_buffer.append(("clear_chat", None))
+                    else:
+                        self._clear_chat_screen()
                 elif kind == "export_report":
                     self._export_report(payload)
                 elif kind == "join_error":
@@ -2443,6 +2493,8 @@ class ChatApp:
 
         self.sock = sock
         self.connected = True
+        self.chat_paused = False
+        self.paused_buffer = []
         self.chat_history.clear()
         self.event_queue.put(("chat", welcome.strip()))
         self.event_queue.put(("joined", (room, username)))
@@ -2616,6 +2668,16 @@ class ChatApp:
             self.msg_entry.delete(0, "end")
             return
 
+        if msg.lower() == "/pause":
+            self.msg_entry.delete(0, "end")
+            self._pause_chat()
+            return
+
+        if msg.lower() == "/unpause":
+            self.msg_entry.delete(0, "end")
+            self._unpause_chat()
+            return
+
         if msg == "/share":
             self.msg_entry.delete(0, "end")
             filepath = filedialog.askopenfilename(title="Select file to share", parent=self.root)
@@ -2660,6 +2722,8 @@ class ChatApp:
                 pass
             self.sock = None
 
+        self.chat_paused = False
+        self.paused_buffer = []
         self.chat_history.clear()
         self.chat_box.configure(state="normal")
         self.chat_box.delete("1.0", "end")
