@@ -440,7 +440,13 @@ def get_next_available_port():
     while True:
         for p in range(PORT_POOL_START, _dynamic_port_ceiling + 1):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if os.name == "nt":
+                # On Windows, SO_REUSEADDR lets a second program share a port that is already
+                # in use, so a new room could silently end up on an old room's port.
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sock.bind(("0.0.0.0", p))
                 return sock, p
@@ -604,6 +610,7 @@ class RoomServer:
 
         try:
             sock.listen()
+            sock.settimeout(0.5)   # so the accept loop notices when the room is closed
             self.socket = sock
             self.port = port
         except OSError:
@@ -611,7 +618,8 @@ class RoomServer:
             return None
 
         self.running = True
-        threading.Thread(target=self._accept_loop, daemon=True).start()
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
         threading.Thread(target=self._discovery_responder, daemon=True).start()
         return self.port
 
@@ -625,6 +633,15 @@ class RoomServer:
                     pass
             self.clients.clear()
         if self.socket:
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)   # wakes a blocked accept() straight away
+            except OSError:
+                pass
+            # Wait for the accept loop to finish: closing a listening socket while another
+            # thread is still inside accept() leaves the port open and the old room answering.
+            t = getattr(self, "_accept_thread", None)
+            if t and t is not threading.current_thread():
+                t.join(timeout=2.0)
             try:
                 self.socket.close()
             except OSError:
@@ -665,10 +682,16 @@ class RoomServer:
         udp_sock.close()
 
     def _accept_loop(self):
+        listener = self.socket
         while self.running:
             try:
-                sock, addr = self.socket.accept()
+                sock, addr = listener.accept()
+            except socket.timeout:
+                continue
             except OSError:
+                break
+            if not self.running:
+                sock.close()
                 break
             threading.Thread(target=self._handle_client, args=(sock, addr), daemon=True).start()
 
