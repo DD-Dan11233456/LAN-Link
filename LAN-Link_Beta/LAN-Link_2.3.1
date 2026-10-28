@@ -1717,12 +1717,17 @@ class RoomServer:
             pass
         finally:
             with self.lock:
+                was_host = bool(was_member and self.host_socket is sock)
                 self._cleanup_disconnected_client_locked(sock)
             try:
                 sock.close()
             except OSError:
                 pass
-            if username and was_member:
+            if was_host and self.running:
+                # The host left: tell everyone, then close the room (no separate "left the room" line).
+                self._broadcast("KICKED:Host closed the room\n")
+                self.stop()
+            elif username and was_member:
                 self._broadcast(f"SYS_LEAVE:** {username} left the room **\n")
 
 
