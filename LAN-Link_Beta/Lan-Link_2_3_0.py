@@ -23,6 +23,7 @@ import subprocess
 import hashlib
 import io
 import struct
+import traceback
 from email.message import EmailMessage
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
@@ -1863,6 +1864,10 @@ class ChatApp:
             def write(self, msg):
                 if msg:
                     self.eq.put(("debug", msg))
+                    try:
+                        sys.__stderr__.write(msg)   # also show in the terminal, so crashes are never hidden
+                    except Exception:
+                        pass
             def flush(self): pass
             
         sys.stdout = StdoutRedirector(self.event_queue)
@@ -3301,16 +3306,41 @@ class ChatApp:
             pass
         self.root.destroy()
 
+def _show_startup_problem(root, text):
+    """Show why LAN-Link couldn't start inside the window itself (and in the terminal)."""
+    try:
+        sys.__stderr__.write("\nLAN-Link could not start:\n" + text + "\n")
+    except Exception:
+        pass
+    for w in root.winfo_children():
+        w.destroy()
+    root.title("LAN-Link - could not start")
+    root.geometry("640x380")
+    box = scrolledtext.ScrolledText(root, wrap="word", height=14)
+    box.insert("1.0", "LAN-Link could not start.\n\n" + text)
+    box.configure(state="disabled")
+    box.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+    ttk.Button(root, text="Close", command=root.destroy).pack(pady=(0, 10))
+    root.mainloop()
+
+
 def main():
     root = tk.Tk()
     if not HAS_CRYPTO:
-        messagebox.showerror(
-            "Missing dependency",
-            "LAN-Link needs the 'cryptography' package to encrypt your messages.\n\n"
-            "Install it with:\n    pip install cryptography\n\nThen start LAN-Link again.")
-        root.destroy()
+        _show_startup_problem(root,
+            "LAN-Link needs the 'cryptography' package to encrypt your messages, and it isn't installed.\n\n"
+            "Install it with ONE of these, then start LAN-Link again:\n\n"
+            "  Debian / Ubuntu / Mint:   sudo apt install python3-cryptography\n"
+            "  Fedora:                   sudo dnf install python3-cryptography\n"
+            "  Arch / Manjaro:           sudo pacman -S python-cryptography\n"
+            "  Any system with pip:      pip install cryptography\n"
+            "  (if pip says 'externally-managed-environment', use the system package above)")
         sys.exit(1)
-    app = ChatApp(root)
+    try:
+        app = ChatApp(root)
+    except Exception:
+        _show_startup_problem(root, "An error happened while building the window:\n\n" + traceback.format_exc())
+        sys.exit(1)
     root.mainloop()
 
 if __name__ == "__main__":
