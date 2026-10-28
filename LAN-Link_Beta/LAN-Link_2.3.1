@@ -1795,15 +1795,11 @@ class ChatApp:
         self.rooms_loaded_count = 0
         self.selected_room = None
 
-        self._build_debug_window()
-
         footer_frame = ttk.Frame(self.root, padding=(10, 2))
         footer_frame.pack(side="bottom", fill="x")
 
         self.version_lbl = ttk.Label(footer_frame, text=f"LAN-Link {VERSION}", font=("", 9, "bold"), foreground="gray")
         self.version_lbl.pack(side="left")
-        self.debug_btn = ttk.Button(footer_frame, text="🐞 Toggle Debug Console", command=self._toggle_debug)
-        self.debug_btn.pack(side="right")
 
         self._build_home_frame()
         self._build_host_frame()
@@ -1913,37 +1909,6 @@ class ChatApp:
                 sock.close()
             except OSError:
                 pass
-
-    def _build_debug_window(self):
-        self.debug_window = tk.Toplevel(self.root)
-        self.debug_window.title("Debug Console")
-        self.debug_window.geometry("550x400")
-        self.debug_window.withdraw()
-        self.debug_window.protocol("WM_DELETE_WINDOW", self.debug_window.withdraw)
-
-        self.debug_text = scrolledtext.ScrolledText(self.debug_window, state="disabled", wrap="word", font=("Consolas", 9))
-        self.debug_text.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        class StdoutRedirector:
-            def __init__(self, eq):
-                self.eq = eq
-            def write(self, msg):
-                if msg:
-                    self.eq.put(("debug", msg))
-                    try:
-                        sys.__stderr__.write(msg)   # also show in the terminal, so crashes are never hidden
-                    except Exception:
-                        pass
-            def flush(self): pass
-            
-        sys.stdout = StdoutRedirector(self.event_queue)
-        sys.stderr = sys.stdout
-
-    def _toggle_debug(self):
-        if self.debug_window.state() == "withdrawn":
-            self.debug_window.deiconify()
-        else:
-            self.debug_window.withdraw()
 
     def _build_home_frame(self):
         self.home_frame = ttk.Frame(self.root, padding=25)
@@ -2674,12 +2639,7 @@ class ChatApp:
         try:
             while True:
                 kind, payload = self.event_queue.get_nowait()
-                if kind == "debug":
-                    self.debug_text.configure(state="normal")
-                    self.debug_text.insert("end", payload)
-                    self.debug_text.see("end")
-                    self.debug_text.configure(state="disabled")
-                elif kind == "search_note":
+                if kind == "search_note":
                     self.search_status_var.set(payload)
                 elif kind == "rooms_found":
                     self._populate_rooms(payload)
